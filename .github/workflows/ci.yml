@@ -33,3 +33,21 @@ jobs:
           npm run bundle -w @auto-factory/phase1-resource-factory
           git diff --exit-code -- packages/phase1-resource-factory/dist/action.bundle.js \
             || { echo "::error::action.bundle.js is stale — run 'npm run bundle -w @auto-factory/phase1-resource-factory' and commit."; exit 1; }
+      - name: Action bundle loads without node_modules (bare `uses:` form)
+        # Partners on the plain `uses:` workflow run the bundle with ZERO
+        # installed packages — an eager import of any --external package makes
+        # the bundle unloadable for all of them (ERR_MODULE_NOT_FOUND before a
+        # single line runs). Execute the bundle in an empty directory and
+        # require it to reach the missing-config error, proving module loading
+        # completed.
+        run: |
+          D=$(mktemp -d)
+          cp packages/phase1-resource-factory/dist/action.bundle.js "$D/"
+          echo '{"type":"module"}' > "$D/package.json"
+          cd "$D"
+          set +e
+          OUT=$(node action.bundle.js 2>&1)
+          set -e
+          echo "$OUT" | head -5
+          echo "$OUT" | grep -q "LD_SDK_KEY not set" \
+            || { echo "::error::bundle failed to start in isolation — likely an eager import of an --external package (must be lazy with a fallback; see observability.ts)"; exit 1; }

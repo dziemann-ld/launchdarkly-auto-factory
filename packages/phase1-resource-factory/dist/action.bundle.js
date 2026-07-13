@@ -37123,8 +37123,8 @@ var LdResourceWriter = class {
   async createMetric(args) {
     if (!args.key)
       throw new Error("metric key is required");
-    const trace2 = Boolean(args.traceQuery);
-    if (!trace2 && !args.eventKey)
+    const trace = Boolean(args.traceQuery);
+    if (!trace && !args.eventKey)
       throw new Error("metric eventKey is required (or pass traceQuery for a trace-backed metric)");
     const numeric = args.category === "latency";
     const successCriteria = args.category === "business" ? "HigherThanBaseline" : "LowerThanBaseline";
@@ -37139,7 +37139,7 @@ var LdResourceWriter = class {
       tags: dedupe(["auto-factory", "auto-generated", ...args.tags ?? []]),
       // Numeric (latency) metrics need a unit + an aggregation; occurrence metrics don't.
       ...numeric ? { unit: args.unit || "ms", unitAggregationType: "average" } : {},
-      ...trace2 ? {
+      ...trace ? {
         // Trace-backed (verified against the live API, 2026-07-13): the
         // regular metrics POST with kind=trace + a span filter; numeric
         // metrics read their value from traceValueLocation.
@@ -37157,7 +37157,7 @@ var LdResourceWriter = class {
       created: !alreadyExists,
       alreadyExists,
       key: args.key,
-      detail: alreadyExists ? `Metric '${args.key}' already exists in project '${this.ld.projectKey}' (no change).` : trace2 ? `Created ${args.category} TRACE metric '${args.key}' (traceQuery: ${args.traceQuery}) in project '${this.ld.projectKey}'.` : `Created ${args.category} metric '${args.key}' (event '${args.eventKey}') in project '${this.ld.projectKey}'.`
+      detail: alreadyExists ? `Metric '${args.key}' already exists in project '${this.ld.projectKey}' (no change).` : trace ? `Created ${args.category} TRACE metric '${args.key}' (traceQuery: ${args.traceQuery}) in project '${this.ld.projectKey}'.` : `Created ${args.category} metric '${args.key}' (event '${args.eventKey}') in project '${this.ld.projectKey}'.`
     };
   }
 };
@@ -37166,11 +37166,53 @@ var LdResourceWriter = class {
 init_sdk();
 
 // ../shared/dist/observability.js
-import { SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import * as nodeModule from "node:module";
 var TRACER_NAME = "launchdarkly-auto-factory";
 var MAX_CONTENT = 8e3;
+var NOOP_SPAN = {
+  setAttribute() {
+    return NOOP_SPAN;
+  },
+  setAttributes() {
+    return NOOP_SPAN;
+  },
+  setStatus() {
+    return NOOP_SPAN;
+  },
+  recordException() {
+  },
+  addEvent() {
+    return NOOP_SPAN;
+  },
+  updateName() {
+    return NOOP_SPAN;
+  },
+  end() {
+  },
+  isRecording() {
+    return false;
+  },
+  spanContext() {
+    return { traceId: "0".repeat(32), spanId: "0".repeat(16), traceFlags: 0 };
+  }
+};
+function loadOtelApi() {
+  try {
+    return nodeModule.createRequire(import.meta.url)("@opentelemetry/api");
+  } catch {
+    return {
+      trace: { getTracer: () => ({ startSpan: () => NOOP_SPAN }) },
+      // Values mirror the OTel API enums so recorded constants stay comparable.
+      SpanKind: { INTERNAL: 0, SERVER: 1, CLIENT: 2, PRODUCER: 3, CONSUMER: 4 },
+      SpanStatusCode: { UNSET: 0, OK: 1, ERROR: 2 }
+    };
+  }
+}
+var otel = loadOtelApi();
+var SpanKind = otel.SpanKind;
+var SpanStatusCode = otel.SpanStatusCode;
 function aiTracer() {
-  return trace.getTracer(TRACER_NAME);
+  return otel.trace.getTracer(TRACER_NAME);
 }
 function truncate(s) {
   return s.length > MAX_CONTENT ? `${s.slice(0, MAX_CONTENT)}\u2026[truncated]` : s;
