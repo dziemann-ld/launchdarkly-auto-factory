@@ -68,7 +68,7 @@ what the runtime grants. That split is the prototype's security model.
 
 The factory reads its agent configuration from one LaunchDarkly project (the **factory**
 project) and writes flags and metrics into another (the **app** project). Agents can never
-touch the project that defines them, and a misbehaving run's blast radius is confined to
+touch the project that defines them, and a run's impact radius is confined to
 the app project.
 
 ### Safety is structural
@@ -90,7 +90,7 @@ the app project.
 Each agent run records duration, tokens, tool usage, and success or error to LaunchDarkly
 AI Config monitoring, and emits OpenTelemetry spans to LLM observability. LaunchDarkly
 **judges** attached to the coding agents score each output against *verified evidence* —
-the git diff of what the agent actually committed, gathered by the pipeline rather than
+the git diff of what the agent committed, gathered by the pipeline rather than
 claimed by the agent. Judge scores are sampled and non-blocking (the reviewer agent
 remains the gate), and they are the instrument for every comparison the factory makes:
 model A/Bs and enrichment experiments alike must move the scores to earn their keep.
@@ -154,8 +154,7 @@ an orchestrator (called Beacon in the reference implementation) that:
    release, turning the flag on and starting the guarded rollout atomically.
 4. **Observes only.** The rollout itself — stage progression, metric comparison against
    control on live traffic, automatic rollback — runs server-side in LaunchDarkly. The
-   orchestrator polls purely to record the outcome; if it dies mid-release, the release
-   is unaffected.
+   orchestrator polls purely to record the outcome.
 
 The orchestrator is deliberately a *translator to LaunchDarkly primitives*, not a
 scheduler: staging and multi-phase release logic belong to the platform, not the
@@ -208,4 +207,10 @@ These may change as development progresses:
    store is a single-instance local file (mount a volume to survive redeploys).
 3. Fullstack (cross-service) release coordination is the least-exercised path.
 4. Trace-based metrics depend on Early Access observability features and on the
-   application services being instrumented with LaunchDarkly observability SDKs.
+   application services emitting telemetry to LaunchDarkly. Any
+   OpenTelemetry-compliant instrumentation works — the LaunchDarkly observability
+   SDKs, other OTel-based observability tooling, or the bare OTel SDKs — as long
+   as the data is routed to LaunchDarkly. For a trace metric to attribute to a
+   flag, the flag evaluation must be recorded on the trace: the LaunchDarkly SDK
+   plugins do this automatically via the flag evaluation hook; other OTel setups
+   add the equivalent span attributes themselves.
