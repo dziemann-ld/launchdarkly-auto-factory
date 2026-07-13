@@ -72,7 +72,8 @@
           "create_metric",
           "edit_files",
           "write_manifest",
-          "read_docs"
+          "read_docs",
+          "query_graph"
         ],
         "require_tags": {
           "flag_created": "true"

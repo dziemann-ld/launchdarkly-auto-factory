@@ -210,6 +210,13 @@ export class LdClient {
     });
   }
 
+  /** List metrics in the project (paginated; caller filters). */
+  listMetrics<T = unknown>(limit = 100): Promise<LdResponse<T>> {
+    return this.request<T>({
+      path: `/api/v2/metrics/${this.conn.projectKey}?limit=${limit}`,
+    });
+  }
+
   /** Create a metric. Returns status 409 (not throwing) when it exists. */
   createMetric<T = unknown>(body: unknown): Promise<LdResponse<T>> {
     // Trace-backed metrics (kind=trace, traceQuery) require the beta API
