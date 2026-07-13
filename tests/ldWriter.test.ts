@@ -6,6 +6,7 @@ import { LdResourceWriter, type LdClient } from "@auto-factory/shared";
 /** Fake LdClient capturing the createFlag/createMetric body, returning a scripted status. */
 function fakeClient(status: number) {
   let lastBody: Record<string, unknown> | undefined;
+  let lastPatch: { instructions: unknown[] } | undefined;
   const capture = async (body: unknown) => {
     lastBody = body as Record<string, unknown>;
     return { status, data: {} };
@@ -14,8 +15,12 @@ function fakeClient(status: number) {
     projectKey: "demo",
     createFlag: capture,
     createMetric: capture,
+    patchFlagProjectSemantic: async (_key: string, instructions: unknown[]) => {
+      lastPatch = { instructions };
+      return { status: 200, data: {} };
+    },
   } as unknown as LdClient;
-  return { client, body: () => lastBody };
+  return { client, body: () => lastBody, patch: () => lastPatch };
 }
 
 describe("LdResourceWriter.createBooleanFlag", () => {
@@ -55,6 +60,30 @@ describe("LdResourceWriter.createBooleanFlag", () => {
     const b = body();
     assert.equal(b?.temporary, true);
     assert.deepEqual(b?.defaults, { onVariation: 0, offVariation: 1 });
+  });
+
+  it("frontend scope enables client-side SDK availability on create", async () => {
+    const { client, body } = fakeClient(201);
+    await new LdResourceWriter(client).createBooleanFlag({ key: "k", scope: "frontend" });
+    assert.deepEqual(body()?.clientSideAvailability, {
+      usingEnvironmentId: true,
+      usingMobileKey: false,
+    });
+  });
+
+  it("backend scope does not expose the flag to the client-side SDK", async () => {
+    const { client, body, patch } = fakeClient(201);
+    await new LdResourceWriter(client).createBooleanFlag({ key: "k", scope: "backend" });
+    assert.equal(body()?.clientSideAvailability, undefined);
+    assert.equal(patch(), undefined);
+  });
+
+  it("on 409 with frontend scope, patches client-side availability for an existing flag", async () => {
+    const { client, patch } = fakeClient(409);
+    await new LdResourceWriter(client).createBooleanFlag({ key: "k", scope: "frontend" });
+    assert.deepEqual(patch()?.instructions, [
+      { kind: "turnOnClientSideAvailability", value: "usingEnvironmentId" },
+    ]);
   });
 });
 

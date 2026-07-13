@@ -1,7 +1,7 @@
 {
   "key": "create_flag",
   "name": "create_flag",
-  "description": "Create a boolean feature flag in LaunchDarkly (the app/data-plane project). Treatment=true (new behavior), Control=false (existing behavior, served when off). Idempotent: re-creating an existing key is a no-op. After it succeeds, the flag_created/flag_key tags are set for you.",
+  "description": "Create a boolean feature flag in LaunchDarkly (the app/data-plane project). Treatment=true (new behavior), Control=false (existing behavior, served when off). Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_created/flag_key tags are set for you.",
   "schema": {
     "type": "object",
     "properties": {
@@ -16,6 +16,15 @@
       "description": {
         "type": "string",
         "description": "What the flag gates"
+      },
+      "scope": {
+        "type": "string",
+        "enum": [
+          "frontend",
+          "backend",
+          "fullstack"
+        ],
+        "description": "Deploy scope from the release manifest. frontend/fullstack flags are exposed to the client-side SDK; backend flags are server-only. When omitted, read from `.release-flags/pr-<N>.json` if present."
       },
       "tags": {
         "type": "array",

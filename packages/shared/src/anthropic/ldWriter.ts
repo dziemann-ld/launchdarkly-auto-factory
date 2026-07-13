@@ -9,6 +9,7 @@
  */
 
 import type { LdClient } from "../ldClient.js";
+import type { Scope } from "../types.js";
 
 export interface CreateFlagArgs {
   /** Flag key (e.g. "enable-farewell"). */
@@ -18,6 +19,17 @@ export interface CreateFlagArgs {
   description?: string;
   /** Extra tags, merged with the standard auto-factory tags. */
   tags?: string[];
+  /**
+   * Release scope from `.release-flags/*.json`. When `frontend` or `fullstack`,
+   * the flag is exposed to the client-side SDK (browser/mobile web). Backend-only
+   * flags stay server-side.
+   */
+  scope?: Scope;
+}
+
+/** Frontend and fullstack flags are evaluated in browser SDKs — must be client-visible. */
+export function scopeNeedsClientSide(scope?: Scope): boolean {
+  return scope === "frontend" || scope === "fullstack";
 }
 
 /**
@@ -81,6 +93,7 @@ export class LdResourceWriter {
    */
   async createBooleanFlag(args: CreateFlagArgs): Promise<LdWriteResult> {
     if (!args.key) throw new Error("flag key is required");
+    const clientSide = scopeNeedsClientSide(args.scope);
     const body = {
       key: args.key,
       name: args.name || args.key,
@@ -93,17 +106,33 @@ export class LdResourceWriter {
       ],
       // On = treatment (index 0); Off = control (index 1) — flag-off preserves existing behavior.
       defaults: { onVariation: 0, offVariation: 1 },
+      ...(clientSide
+        ? { clientSideAvailability: { usingEnvironmentId: true, usingMobileKey: false } }
+        : {}),
     };
     const res = await this.ld.createFlag(body);
     const alreadyExists = res.status === 409;
+    if (clientSide && alreadyExists) {
+      await this.ensureClientSideAvailability(args.key);
+    }
+    const clientSideNote = clientSide ? " Client-side SDK availability enabled." : "";
     return {
       created: !alreadyExists,
       alreadyExists,
       key: args.key,
       detail: alreadyExists
-        ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).`
-        : `Created flag '${args.key}' in project '${this.ld.projectKey}'.`,
+        ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).${clientSideNote}`
+        : `Created flag '${args.key}' in project '${this.ld.projectKey}'.${clientSideNote}`,
     };
+  }
+
+  /** Idempotent: turn on client-side ID availability for an existing flag. */
+  private async ensureClientSideAvailability(flagKey: string): Promise<void> {
+    await this.ld.patchFlagProjectSemantic(
+      flagKey,
+      [{ kind: "turnOnClientSideAvailability", value: "usingEnvironmentId" }],
+      "AutoFactory: expose frontend-scoped flag to client-side SDK",
+    );
   }
 
   /**

@@ -21,6 +21,7 @@ import type { KnowledgeGraph } from "../graph/schema.js";
 import { fileNodeId, flagNodeId, serviceNodeId } from "../graph/schema.js";
 import { blastRadius, neighbors } from "../graph/query.js";
 import type { LdResourceWriter, MetricCategory } from "./ldWriter.js";
+import type { ReleaseFlagFile, Scope } from "../types.js";
 
 export interface AnthropicToolDef {
   name: string;
@@ -91,13 +92,19 @@ const READONLY_TOOLS: AnthropicToolDef[] = [
 const CREATE_FLAG_TOOL: AnthropicToolDef = {
   name: "create_flag",
   description:
-    "Create a boolean feature flag in LaunchDarkly (the app/data-plane project). Treatment=true (new behavior), Control=false (existing behavior, served when off). Idempotent: re-creating an existing key is a no-op. After it succeeds, the flag_created/flag_key tags are set for you.",
+    "Create a boolean feature flag in LaunchDarkly (the app/data-plane project). Treatment=true (new behavior), Control=false (existing behavior, served when off). Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_created/flag_key tags are set for you.",
   input_schema: {
     type: "object",
     properties: {
       key: { type: "string", description: "Flag key, e.g. enable-farewell (lowercase, hyphenated)" },
       name: { type: "string", description: "Human-readable flag name" },
       description: { type: "string", description: "What the flag gates" },
+      scope: {
+        type: "string",
+        enum: ["frontend", "backend", "fullstack"],
+        description:
+          "Deploy scope from the release manifest. frontend/fullstack flags are exposed to the client-side SDK; backend flags are server-only. When omitted, read from `.release-flags/pr-<N>.json` if present.",
+      },
       tags: { type: "array", items: { type: "string" }, description: "Extra tags (auto-factory tags are added automatically)" },
     },
     required: ["key"],
@@ -660,16 +667,50 @@ export class SandboxToolExecutor {
 
   private async createFlag(input: Record<string, unknown>): Promise<ToolExecResult> {
     if (!this.writer) return { content: "create_flag is not available", isError: true };
+    const key = String(input.key ?? "");
+    const scope = this.resolveFlagScope(input, key);
     const result = await this.writer.createBooleanFlag({
-      key: String(input.key ?? ""),
+      key,
       ...(input.name ? { name: String(input.name) } : {}),
       ...(input.description ? { description: String(input.description) } : {}),
       ...(Array.isArray(input.tags) ? { tags: input.tags.map(String) } : {}),
+      ...(scope ? { scope } : {}),
     });
     // Set routing tags so the chain advances even if the agent forgets to tag.
     this.tags.flag_created = "true";
     this.tags.flag_key = result.key;
     return { content: result.detail };
+  }
+
+  /**
+   * Scope for client-side SDK exposure: explicit `scope` arg, else the matching
+   * (or sole) `.release-flags/*.json` entry. Manifest scope defaults to frontend.
+   */
+  private resolveFlagScope(input: Record<string, unknown>, flagKey: string): Scope | undefined {
+    const raw = typeof input.scope === "string" ? input.scope.trim() : "";
+    if (raw === "frontend" || raw === "backend" || raw === "fullstack") return raw;
+    return this.readScopeFromManifest(flagKey);
+  }
+
+  private readScopeFromManifest(flagKey: string): Scope | undefined {
+    const dir = resolve(this.root, ".release-flags");
+    if (!existsSync(dir)) return undefined;
+    const files = readdirSync(dir).filter((name) => name.endsWith(".json"));
+    if (!files.length) return undefined;
+
+    let sole: ReleaseFlagFile | undefined;
+    for (const name of files) {
+      try {
+        const data = JSON.parse(readFileSync(resolve(dir, name), "utf8")) as ReleaseFlagFile;
+        sole = data;
+        if (data.flagKey === flagKey) return data.scope ?? "frontend";
+      } catch {
+        /* ignore malformed manifest */
+      }
+    }
+    // Planner creates the manifest before implementer; a single file is the PR's scope source.
+    if (files.length === 1 && sole) return sole.scope ?? "frontend";
+    return undefined;
   }
 
   private async createMetric(input: Record<string, unknown>): Promise<ToolExecResult> {

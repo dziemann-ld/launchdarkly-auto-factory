@@ -405,3 +405,44 @@ describe("SandboxToolExecutor — write_manifest", () => {
     assert.match(r.content, /Intent issues/);
   });
 });
+
+describe("SandboxToolExecutor — create_flag scope", () => {
+  class RecordingWriter {
+    lastArgs: CreateFlagArgs | undefined;
+    async createBooleanFlag(args: CreateFlagArgs): Promise<LdWriteResult> {
+      this.lastArgs = args;
+      return { created: true, alreadyExists: false, key: args.key, detail: "ok" };
+    }
+    async createMetric(_args: CreateMetricArgs): Promise<LdWriteResult> {
+      throw new Error("unused");
+    }
+    get projectKey() {
+      return "demo";
+    }
+  }
+
+  it("reads frontend scope from the sole release manifest when scope is omitted", async () => {
+    mkdirSync(join(root, ".release-flags"), { recursive: true });
+    writeFileSync(
+      join(root, ".release-flags/pr-9.json"),
+      JSON.stringify({ flagKey: "enable-x", scope: "frontend" }),
+    );
+    const writer = new RecordingWriter();
+    const exec = new SandboxToolExecutor(root, writer as unknown as LdResourceWriter);
+    const r = await exec.execute("create_flag", { key: "enable-x" });
+    assert.equal(r.isError, undefined);
+    assert.equal(writer.lastArgs?.scope, "frontend");
+  });
+
+  it("honors an explicit backend scope over the manifest", async () => {
+    mkdirSync(join(root, ".release-flags"), { recursive: true });
+    writeFileSync(
+      join(root, ".release-flags/pr-9.json"),
+      JSON.stringify({ flagKey: "enable-x", scope: "frontend" }),
+    );
+    const writer = new RecordingWriter();
+    const exec = new SandboxToolExecutor(root, writer as unknown as LdResourceWriter);
+    await exec.execute("create_flag", { key: "enable-x", scope: "backend" });
+    assert.equal(writer.lastArgs?.scope, "backend");
+  });
+});

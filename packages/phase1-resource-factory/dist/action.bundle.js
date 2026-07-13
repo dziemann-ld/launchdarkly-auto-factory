@@ -33359,6 +33359,15 @@ var LdClient = class {
       body: { environmentKey, instructions, ...comment ? { comment } : {} }
     });
   }
+  /** Project-scoped semantic patch (e.g. turnOnClientSideAvailability). */
+  patchFlagProjectSemantic(flagKey, instructions, comment) {
+    return this.request({
+      method: "PATCH",
+      path: `/api/v2/flags/${this.conn.projectKey}/${flagKey}`,
+      headers: { "Content-Type": "application/json; domain-model=launchdarkly.semanticpatch" },
+      body: { instructions, ...comment ? { comment } : {} }
+    });
+  }
 };
 var LdApiError = class extends Error {
   method;
@@ -36261,13 +36270,18 @@ var READONLY_TOOLS = [
 ];
 var CREATE_FLAG_TOOL = {
   name: "create_flag",
-  description: "Create a boolean feature flag in LaunchDarkly (the app/data-plane project). Treatment=true (new behavior), Control=false (existing behavior, served when off). Idempotent: re-creating an existing key is a no-op. After it succeeds, the flag_created/flag_key tags are set for you.",
+  description: "Create a boolean feature flag in LaunchDarkly (the app/data-plane project). Treatment=true (new behavior), Control=false (existing behavior, served when off). Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_created/flag_key tags are set for you.",
   input_schema: {
     type: "object",
     properties: {
       key: { type: "string", description: "Flag key, e.g. enable-farewell (lowercase, hyphenated)" },
       name: { type: "string", description: "Human-readable flag name" },
       description: { type: "string", description: "What the flag gates" },
+      scope: {
+        type: "string",
+        enum: ["frontend", "backend", "fullstack"],
+        description: "Deploy scope from the release manifest. frontend/fullstack flags are exposed to the client-side SDK; backend flags are server-only. When omitted, read from `.release-flags/pr-<N>.json` if present."
+      },
       tags: { type: "array", items: { type: "string" }, description: "Extra tags (auto-factory tags are added automatically)" }
     },
     required: ["key"]
@@ -36714,15 +36728,49 @@ ${body}` };
   async createFlag(input) {
     if (!this.writer)
       return { content: "create_flag is not available", isError: true };
+    const key = String(input.key ?? "");
+    const scope = this.resolveFlagScope(input, key);
     const result = await this.writer.createBooleanFlag({
-      key: String(input.key ?? ""),
+      key,
       ...input.name ? { name: String(input.name) } : {},
       ...input.description ? { description: String(input.description) } : {},
-      ...Array.isArray(input.tags) ? { tags: input.tags.map(String) } : {}
+      ...Array.isArray(input.tags) ? { tags: input.tags.map(String) } : {},
+      ...scope ? { scope } : {}
     });
     this.tags.flag_created = "true";
     this.tags.flag_key = result.key;
     return { content: result.detail };
+  }
+  /**
+   * Scope for client-side SDK exposure: explicit `scope` arg, else the matching
+   * (or sole) `.release-flags/*.json` entry. Manifest scope defaults to frontend.
+   */
+  resolveFlagScope(input, flagKey) {
+    const raw = typeof input.scope === "string" ? input.scope.trim() : "";
+    if (raw === "frontend" || raw === "backend" || raw === "fullstack")
+      return raw;
+    return this.readScopeFromManifest(flagKey);
+  }
+  readScopeFromManifest(flagKey) {
+    const dir = resolve2(this.root, ".release-flags");
+    if (!existsSync2(dir))
+      return void 0;
+    const files = readdirSync2(dir).filter((name) => name.endsWith(".json"));
+    if (!files.length)
+      return void 0;
+    let sole;
+    for (const name of files) {
+      try {
+        const data = JSON.parse(readFileSync3(resolve2(dir, name), "utf8"));
+        sole = data;
+        if (data.flagKey === flagKey)
+          return data.scope ?? "frontend";
+      } catch {
+      }
+    }
+    if (files.length === 1 && sole)
+      return sole.scope ?? "frontend";
+    return void 0;
   }
   async createMetric(input) {
     if (!this.writer)
@@ -37014,6 +37062,9 @@ ${t.out}`), isError: t.code !== 0 };
 };
 
 // ../shared/dist/anthropic/ldWriter.js
+function scopeNeedsClientSide(scope) {
+  return scope === "frontend" || scope === "fullstack";
+}
 function dedupe(values) {
   return [...new Set(values.filter(Boolean))];
 }
@@ -37032,6 +37083,7 @@ var LdResourceWriter = class {
   async createBooleanFlag(args) {
     if (!args.key)
       throw new Error("flag key is required");
+    const clientSide = scopeNeedsClientSide(args.scope);
     const body = {
       key: args.key,
       name: args.name || args.key,
@@ -37043,16 +37095,25 @@ var LdResourceWriter = class {
         { value: false, name: "Control" }
       ],
       // On = treatment (index 0); Off = control (index 1) — flag-off preserves existing behavior.
-      defaults: { onVariation: 0, offVariation: 1 }
+      defaults: { onVariation: 0, offVariation: 1 },
+      ...clientSide ? { clientSideAvailability: { usingEnvironmentId: true, usingMobileKey: false } } : {}
     };
     const res = await this.ld.createFlag(body);
     const alreadyExists = res.status === 409;
+    if (clientSide && alreadyExists) {
+      await this.ensureClientSideAvailability(args.key);
+    }
+    const clientSideNote = clientSide ? " Client-side SDK availability enabled." : "";
     return {
       created: !alreadyExists,
       alreadyExists,
       key: args.key,
-      detail: alreadyExists ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).` : `Created flag '${args.key}' in project '${this.ld.projectKey}'.`
+      detail: alreadyExists ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).${clientSideNote}` : `Created flag '${args.key}' in project '${this.ld.projectKey}'.${clientSideNote}`
     };
+  }
+  /** Idempotent: turn on client-side ID availability for an existing flag. */
+  async ensureClientSideAvailability(flagKey) {
+    await this.ld.patchFlagProjectSemantic(flagKey, [{ kind: "turnOnClientSideAvailability", value: "usingEnvironmentId" }], "AutoFactory: expose frontend-scoped flag to client-side SDK");
   }
   /**
    * Create a guarded-release metric off a custom event. Maps the friendly

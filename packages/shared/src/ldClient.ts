@@ -242,6 +242,20 @@ export class LdClient {
       body: { environmentKey, instructions, ...(comment ? { comment } : {}) },
     });
   }
+
+  /** Project-scoped semantic patch (e.g. turnOnClientSideAvailability). */
+  patchFlagProjectSemantic<T = unknown>(
+    flagKey: string,
+    instructions: unknown[],
+    comment?: string,
+  ): Promise<LdResponse<T>> {
+    return this.request<T>({
+      method: "PATCH",
+      path: `/api/v2/flags/${this.conn.projectKey}/${flagKey}`,
+      headers: { "Content-Type": "application/json; domain-model=launchdarkly.semanticpatch" },
+      body: { instructions, ...(comment ? { comment } : {}) },
+    });
+  }
 }
 
 export class LdApiError extends Error {
