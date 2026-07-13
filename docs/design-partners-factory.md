@@ -211,6 +211,8 @@ These may change as development progresses:
    OpenTelemetry-compliant instrumentation works — the LaunchDarkly observability
    SDKs, other OTel-based observability tooling, or the bare OTel SDKs — as long
    as the data is routed to LaunchDarkly. For a trace metric to attribute to a
-   flag, the flag evaluation must be recorded on the trace: the LaunchDarkly SDK
-   plugins do this automatically via the flag evaluation hook; other OTel setups
-   add the equivalent span attributes themselves.
+   flag, the flag evaluation must be recorded on the trace — automatic either
+   way: the LaunchDarkly observability plugins do it out of the box, and for
+   other OTel setups LaunchDarkly ships
+   [OpenTelemetry tracing hooks](/sdk/features/opentelemetry-server-side) for
+   its server-side SDKs that do the same.
