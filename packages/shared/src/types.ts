@@ -41,6 +41,13 @@ export interface ReleasePlan {
   extensionDurationMillis?: number;
   metricKeys?: string[];
   metricGroupKeys?: string[];
+  /**
+   * AGENT-recommended flag dependencies (cross-repo coordination, from the
+   * research planner's brief; `create_flag` wires them when the parent is in
+   * the same project). Advisory for Phase 2 and humans — distinct from the
+   * human-owned `releaseIntent.prerequisites`, which Beacon applies at release.
+   */
+  prerequisites?: IntentPrerequisite[];
 }
 
 /** Legacy alias for ReleasePlan (pre-1.1 manifests use this key). */

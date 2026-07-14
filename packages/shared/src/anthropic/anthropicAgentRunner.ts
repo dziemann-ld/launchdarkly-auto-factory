@@ -22,6 +22,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { AgentNodeRequest, AgentNodeResult, AgentRunner, AgentStatus } from "../agentRunner.js";
 import { SpanKind, SpanStatusCode, aiTracer, setGenAiAttributes } from "../observability.js";
 import type { KnowledgeGraph } from "../graph/schema.js";
+import { type RelatedRepo, RelatedReposClient } from "../github/relatedRepos.js";
 import type { LdResourceWriter } from "./ldWriter.js";
 import { type GitMode, SandboxToolExecutor, type ToolCapabilities, applyLdToolOverlay, buildSandboxTools } from "./sandboxTools.js";
 
@@ -46,6 +47,11 @@ export function modeNote(caps: ToolCapabilities): string {
   if (caps.queryGraph) {
     lines.push(
       "You have `query_dependencies` — the estate's knowledge graph (service call edges observed from LaunchDarkly telemetry + flag→code wrap points). Call it with NO arguments EARLY to get this PR's blast radius (changed services, dependent services at risk, upstream contracts, flags already on the changed code) and let it inform your classification and risk_score. Treat any entry in its `gaps` list as UNKNOWN coverage — a thin graph is never evidence of low impact.",
+    );
+  }
+  if (caps.queryRepos) {
+    lines.push(
+      "You have `query_related_repos` — the estate's OTHER repositories, registered by this repo (relatedRepos in .autofactory/services.yaml). Call op='list' EARLY, then SEARCH the relevant repos for the concrete surfaces this PR touches (endpoint paths, event names, shared types, flag keys) to establish upstream/downstream impact across the split estate. Report findings in a `cross_repo_impact` section of your research output — per repo: relationship, what is affected, and repo+path evidence — and, when a cross-repo dependency means this feature must not go live before a related repo's flag, name that flag in a `prerequisite_flag_recommendation` for the Flag Implementer (parent flag key + why; only flags in the SAME LaunchDarkly project can be wired as prerequisites — otherwise call it out as advisory). Fold cross-repo exposure into risk_score. No search hits is weak evidence, never proof of no impact.",
     );
   }
   if (caps.readDocs) {
@@ -97,7 +103,9 @@ const NODE_CAPABILITIES: Record<string, ToolCapabilities> = {
   // handoffs), so the research planner's narrow manifest-write power lives here.
   // queryGraph: the planner's blast-radius input (ADR 0010) — only offered when
   // a graph was actually composed for the run (the KG flag gates that upstream).
-  "autofactory-research-planner": { createFlag: false, createMetric: false, editFiles: false, writeManifest: true, queryGraph: true },
+  // queryRepos: cross-repo impact for split-repo estates — only offered when the
+  // app repo registers relatedRepos in .autofactory/services.yaml.
+  "autofactory-research-planner": { createFlag: false, createMetric: false, editFiles: false, writeManifest: true, queryGraph: true, queryRepos: true },
   // The steward normalizes the human-edited releaseIntent — the only node that
   // may UPDATE an existing intent block.
   "autofactory-manifest-steward": { createFlag: false, createMetric: false, editFiles: false, stewardManifest: true },
@@ -142,6 +150,7 @@ export const CAP_WRITE_MANIFEST = "write_manifest";
 export const CAP_STEWARD_MANIFEST = "steward_manifest";
 export const CAP_QUERY_GRAPH = "query_graph";
 export const CAP_READ_DOCS = "read_docs";
+export const CAP_QUERY_REPOS = "query_repos";
 
 /**
  * Resolve a node's requested capability grant: from the edge `capabilities` list
@@ -162,6 +171,7 @@ export function resolveGrant(
         stewardManifest: capabilities.includes(CAP_STEWARD_MANIFEST),
         queryGraph: capabilities.includes(CAP_QUERY_GRAPH),
         readDocs: capabilities.includes(CAP_READ_DOCS),
+        queryRepos: capabilities.includes(CAP_QUERY_REPOS),
       },
       source: "edge",
     };
@@ -198,6 +208,14 @@ export interface AnthropicAgentRunnerOptions {
   knowledgeGraph?: KnowledgeGraph;
   /** Repo-relative files changed in this PR (blast-radius input). */
   changedFiles?: string[];
+  /**
+   * Related repositories registered by the app repo (relatedRepos in
+   * .autofactory/services.yaml). Presence + a GitHub token is the global enable
+   * for `query_related_repos` — no registry, no tool.
+   */
+  relatedRepos?: RelatedRepo[];
+  /** Token for cross-repo reads; falls back to GITHUB_TOKEN in the env. */
+  githubToken?: string;
 }
 
 export class AnthropicAgentRunner implements AgentRunner {
@@ -221,11 +239,16 @@ export class AnthropicAgentRunner implements AgentRunner {
       queryGraph: grant.queryGraph === true && this.opts.knowledgeGraph !== undefined,
       // Read-only; no global gate (fetch failures degrade inside the tool).
       readDocs: grant.readDocs === true,
+      // Read-only; globally enabled by a registered relatedRepos list + a token.
+      queryRepos:
+        grant.queryRepos === true &&
+        (this.opts.relatedRepos?.length ?? 0) > 0 &&
+        Boolean(this.opts.githubToken ?? process.env.GITHUB_TOKEN),
     };
     // Per-node diagnostic: makes a renamed/added agent that silently lost its
     // grant (source "none", read-only) visible in the run logs.
     console.log(
-      `[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} → effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true}`,
+      `[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} queryRepos=${grant.queryRepos === true} → effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true} queryRepos=${caps.queryRepos === true}`,
     );
     const writer = caps.createFlag || caps.createMetric ? this.opts.writer : undefined;
 
@@ -243,6 +266,11 @@ export class AnthropicAgentRunner implements AgentRunner {
     );
     if (caps.queryGraph && this.opts.knowledgeGraph) {
       executor.provideKnowledgeGraph(this.opts.knowledgeGraph, this.opts.changedFiles ?? []);
+    }
+    if (caps.queryRepos && this.opts.relatedRepos) {
+      executor.provideRelatedRepos(
+        new RelatedReposClient(this.opts.relatedRepos, this.opts.githubToken ?? process.env.GITHUB_TOKEN ?? ""),
+      );
     }
     // LD variation tool attachments shape the interface within the capability
     // ceiling (ADR 0011): restrict the offered set, override descriptions/schemas.

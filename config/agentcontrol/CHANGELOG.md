@@ -15,6 +15,38 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-07-14
+
+### ✅ Cross-repo research tool + prerequisite-flag guidance (split-repo estates, ADR 0012)
+- **New tool** `query_related_repos` (attached to the research planner): queries the
+  OTHER repositories an app repo registers under `relatedRepos:` in
+  `.autofactory/services.yaml` — op `list` / `search` (GitHub code search, default
+  branch) / `read_file` / `list_dir` — so the planner can establish upstream/downstream
+  impact of a PR across a split estate with repo+path evidence. Offered only when the
+  registry is non-empty and a GitHub token is present (capability `query_repos`, planner
+  fallback grant; runtime is fail-soft and budgeted at 15 fetches/run). Vega runs tools
+  server-side and skips it, same as `query_dependencies`.
+- **Research planner instructions:** Phase 1 output gains **cross_repo_impact**
+  (per affected related repo: relationship, affected surfaces, evidence) and the Flag
+  Implementation Brief gains **prerequisite_flag_recommendation** (parent flag key +
+  required variation + evidence when the feature must not go live before another
+  flag; 'none' otherwise; advisory when the parent isn't in the same LD project).
+- **Flag implementer instructions:** new **Prerequisites (cross-repo coordination)**
+  section (rules P01–P05): pass `prerequisite: {flagKey, variation}` to `create_flag`
+  when the brief recommends one (LD `addPrerequisite` semantic patch across all
+  environments; flag stays dark so nothing changes until release); record it under
+  `releasePlan.prerequisites` in the manifest; advisory/failed recommendations are
+  recorded in the manifest + brief, never retried blindly.
+- **`create_flag` tool:** new optional `prerequisite` input (parent `flagKey` +
+  `variation`, default `on`). Prerequisite failures never fail flag creation — the
+  error is surfaced back to the agent for its brief.
+- **Why:** distributed teams split one product across repositories; the planner
+  previously reasoned only from the single checkout (plus the knowledge graph's
+  trace edges), so cross-repo consumers were invisible and flag dependencies across
+  repos had no path into the chain. The manifest's agent side gains
+  `releasePlan.prerequisites` so recommendations survive to Phase 2 and humans
+  (distinct from the human-owned `releaseIntent.prerequisites` Beacon applies).
+
 ## 2026-07-13
 
 ### ✅ Metrics author: global autogen guardrails for net-new features + grounded o11y detection

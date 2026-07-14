@@ -44,3 +44,5 @@ export * from "./anthropic/judgeCompletion.js";
 export * from "./cursor/judgeCompletion.js";
 // Knowledge graph (ADR 0010): LD-native composition + agent queries.
 export * from "./graph/index.js";
+// Cross-repo research for split-repo estates (query_related_repos).
+export * from "./github/relatedRepos.js";

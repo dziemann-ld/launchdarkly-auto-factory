@@ -142,6 +142,29 @@ app repo for the standard on-merge code-references scan (no LaunchDarkly-side se
 scanner registers the repository itself). Missing sources degrade to warnings, never
 failures.
 
+**Optional — cross-repo research** (split-repo estates): if parts of your product
+live in other repositories (a mobile app consuming this repo's API, a platform
+library you depend on), register them in `.autofactory/services.yaml`:
+
+```yaml
+relatedRepos:
+  mobile-app:
+    repo: your-org/mobile-app
+    relationship: downstream   # consumes this repo's surfaces (upstream = we consume theirs)
+    description: React Native app calling the gateway API
+```
+
+The research planner then gets a `query_related_repos` tool (list/search/read over
+the GitHub API) to establish upstream/downstream impact of each PR across the
+estate, reported as `cross_repo_impact` in its brief. When a cross-repo dependency
+means a feature must not go live before another flag, the planner recommends a
+**prerequisite flag** and the flag implementer wires it at creation time (the flag
+stays off; the dependency binds at release — same-project flags only, see
+[ADR 0012](docs/adr/0012-cross-repo-research-and-prerequisites.md)). The default
+`GITHUB_TOKEN` reads public and same-repo code; set an `AUTOFACTORY_REPOS_TOKEN`
+secret (and pass it through the workflow env) for private sibling repos. No
+registry, no tool — and failures degrade to warnings, never failed runs.
+
 To run on the **Cursor** provider instead, copy `bootstrap/github-action-template/auto-factory-cursor.yml`
 (it checks the tool out and `npm ci`s it, because the Cursor SDK can't run via the bare
 `uses:` form), set a `CURSOR_API_KEY` secret in place of `ANTHROPIC_API_KEY`, and serve

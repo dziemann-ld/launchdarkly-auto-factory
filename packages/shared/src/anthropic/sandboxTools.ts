@@ -20,6 +20,7 @@ import { intentSkeleton, normalizeReleaseIntent } from "../releaseIntent.js";
 import type { KnowledgeGraph } from "../graph/schema.js";
 import { fileNodeId, flagNodeId, serviceNodeId } from "../graph/schema.js";
 import { blastRadius, neighbors } from "../graph/query.js";
+import type { RelatedReposClient } from "../github/relatedRepos.js";
 import type { LdResourceWriter, MetricCategory } from "./ldWriter.js";
 import type { ReleaseFlagFile, Scope } from "../types.js";
 
@@ -106,6 +107,16 @@ const CREATE_FLAG_TOOL: AnthropicToolDef = {
           "Deploy scope from the release manifest. frontend/fullstack flags are exposed to the client-side SDK; backend flags are server-only. When omitted, read from `.release-flags/pr-<N>.json` if present.",
       },
       tags: { type: "array", items: { type: "string" }, description: "Extra tags (auto-factory tags are added automatically)" },
+      prerequisite: {
+        type: "object",
+        description:
+          "OPTIONAL flag dependency: attach a LaunchDarkly prerequisite so this flag can only serve treatment while the parent flag serves the given variation ('on' = true, default). Use ONLY when the research brief's prerequisite recommendation names a parent flag in the SAME LaunchDarkly project (cross-repo rollout coordination). Applied to every environment; the flag itself stays targeting-off. If the parent can't be found, flag creation still succeeds and the failure is reported back to you — surface it in your brief.",
+        properties: {
+          flagKey: { type: "string", description: "The parent flag key this flag depends on." },
+          variation: { type: "string", enum: ["on", "off"], description: "Parent variation required (default 'on')." },
+        },
+        required: ["flagKey"],
+      },
     },
     required: ["key"],
   },
@@ -211,6 +222,8 @@ export interface ToolCapabilities {
   queryGraph?: boolean;
   /** Offer `read_ld_docs` (LaunchDarkly docs pages as markdown, allowlisted). */
   readDocs?: boolean;
+  /** Offer `query_related_repos` (needs a registered relatedRepos list + GitHub token). */
+  queryRepos?: boolean;
 }
 
 const READ_LD_DOCS_TOOL: AnthropicToolDef = {
@@ -234,6 +247,9 @@ const READ_LD_DOCS_TOOL: AnthropicToolDef = {
     required: ["path"],
   },
 };
+
+/** Cross-repo fetch budget per node run (list is free; search/read/list_dir count). */
+const REPO_MAX_FETCHES_PER_RUN = 15;
 
 /** Docs-fetch policy: bounded, allowlisted, and never load-bearing. */
 const DOCS_HOST = "launchdarkly.com";
@@ -292,6 +308,32 @@ const QUERY_DEPENDENCIES_TOOL: AnthropicToolDef = {
   },
 };
 
+const QUERY_RELATED_REPOS_TOOL: AnthropicToolDef = {
+  name: "query_related_repos",
+  description:
+    "Query the estate's OTHER repositories, registered in .autofactory/services.yaml under relatedRepos — for split-repo estates where upstream/downstream services live outside this checkout. Call op='list' FIRST to see which repos exist and how each relates to this one (downstream = consumes this repo's surfaces; upstream = this repo consumes theirs). Then op='search' the relevant repos for the concrete surfaces this PR touches — endpoint paths, event names, shared types, LaunchDarkly flag keys — and op='read_file'/'list_dir' for exact contents. Cite repo+path evidence in your cross_repo_impact findings and prerequisite-flag recommendation. Search covers each repo's DEFAULT branch and may lag recent pushes: no hits is weak evidence, never proof of no impact. A failed call must not block your task — report the gap and continue.",
+  input_schema: {
+    type: "object",
+    properties: {
+      op: {
+        type: "string",
+        enum: ["list", "search", "read_file", "list_dir"],
+        description: "list = show the registry; search = code search in one repo; read_file / list_dir = fetch contents.",
+      },
+      repo: {
+        type: "string",
+        description: "Registry key or owner/name of the related repo (required for search/read_file/list_dir).",
+      },
+      query: {
+        type: "string",
+        description: "For search: the term to find — an endpoint path ('/api/orders/cancel'), event name, type, or flag key.",
+      },
+      path: { type: "string", description: "For read_file/list_dir: repo-relative path ('' lists the repo root)." },
+    },
+    required: ["op"],
+  },
+};
+
 const WRITE_MANIFEST_TOOL: AnthropicToolDef = {
   name: "write_manifest",
   description:
@@ -323,6 +365,7 @@ export const SANDBOX_TOOL_DEFS: ReadonlyMap<string, AnthropicToolDef> = new Map(
     ...READONLY_TOOLS,
     READ_LD_DOCS_TOOL,
     QUERY_DEPENDENCIES_TOOL,
+    QUERY_RELATED_REPOS_TOOL,
     CREATE_FLAG_TOOL,
     CREATE_METRIC_TOOL,
     LIST_METRICS_TOOL,
@@ -383,6 +426,7 @@ export function buildSandboxTools(caps: ToolCapabilities): AnthropicToolDef[] {
   const tools = [...READONLY_TOOLS];
   if (caps.readDocs) tools.push(READ_LD_DOCS_TOOL);
   if (caps.queryGraph) tools.push(QUERY_DEPENDENCIES_TOOL);
+  if (caps.queryRepos) tools.push(QUERY_RELATED_REPOS_TOOL);
   if (caps.createFlag) tools.push(CREATE_FLAG_TOOL);
   if (caps.createMetric) tools.push(CREATE_METRIC_TOOL, LIST_METRICS_TOOL);
   if (caps.writeManifest || caps.stewardManifest) tools.push(WRITE_MANIFEST_TOOL);
@@ -435,6 +479,8 @@ export class SandboxToolExecutor {
   private knowledgeGraph?: KnowledgeGraph;
   private changedFiles: string[] = [];
   private docsFetches = 0;
+  private relatedRepos?: RelatedReposClient;
+  private repoFetches = 0;
 
   /**
    * Supply the composed knowledge graph (ADR 0010) + the PR's changed files.
@@ -444,6 +490,14 @@ export class SandboxToolExecutor {
   provideKnowledgeGraph(graph: KnowledgeGraph, changedFiles: string[] = []): void {
     this.knowledgeGraph = graph;
     this.changedFiles = changedFiles;
+  }
+
+  /**
+   * Supply the cross-repo client (`query_related_repos`). Only meaningful for
+   * nodes granted `queryRepos`; set after construction like the knowledge graph.
+   */
+  provideRelatedRepos(client: RelatedReposClient): void {
+    this.relatedRepos = client;
   }
 
   constructor(
@@ -497,6 +551,8 @@ export class SandboxToolExecutor {
           return this.writeManifestTool(String(input.path ?? ""), input.manifest);
         case "query_dependencies":
           return this.queryDependencies(input);
+        case "query_related_repos":
+          return await this.queryRelatedRepos(input);
         case "read_ld_docs":
           return await this.readLdDocs(String(input.path ?? ""), input.filter ? String(input.filter) : undefined);
         case "write_file":
@@ -552,6 +608,44 @@ export class SandboxToolExecutor {
       via: `${h.via.kind} (${h.via.provenance}${h.via.evidence ? `: ${h.via.evidence}` : ""})`,
     }));
     return { content: JSON.stringify({ node: nodeId, direction, hits, gaps: graph.gaps }, null, 1) };
+  }
+
+  /**
+   * `query_related_repos`: cross-repo research over the registered relatedRepos
+   * (split-repo estates). Bounded per run; every failure is an isError result
+   * the model reads and works around — cross-repo reads are never load-bearing.
+   */
+  private async queryRelatedRepos(input: Record<string, unknown>): Promise<ToolExecResult> {
+    if (!this.relatedRepos) {
+      return {
+        content:
+          "query_related_repos: no related repositories are registered for this run (relatedRepos in .autofactory/services.yaml) — reason from this repo's code only.",
+        isError: true,
+      };
+    }
+    const op = String(input.op ?? "");
+    if (op === "list") return { content: this.relatedRepos.list() };
+    if (this.repoFetches >= REPO_MAX_FETCHES_PER_RUN) {
+      return {
+        content: `query_related_repos: fetch budget (${REPO_MAX_FETCHES_PER_RUN}/run) exhausted — proceed with the evidence you have`,
+        isError: true,
+      };
+    }
+    this.repoFetches += 1;
+    const repo = String(input.repo ?? "");
+    switch (op) {
+      case "search": {
+        const query = String(input.query ?? "").trim();
+        if (!query) return { content: "query_related_repos: 'query' is required for op='search'", isError: true };
+        return { content: await this.relatedRepos.searchCode(repo, query) };
+      }
+      case "read_file":
+        return { content: await this.relatedRepos.readFile(repo, String(input.path ?? "")) };
+      case "list_dir":
+        return { content: await this.relatedRepos.listDir(repo, String(input.path ?? "")) };
+      default:
+        return { content: `query_related_repos: unknown op '${op}' (list|search|read_file|list_dir)`, isError: true };
+    }
   }
 
   /**
@@ -695,7 +789,21 @@ export class SandboxToolExecutor {
     // Set routing tags so the chain advances even if the agent forgets to tag.
     this.tags.flag_created = "true";
     this.tags.flag_key = result.key;
-    return { content: result.detail };
+
+    // Optional prerequisite (cross-repo rollout coordination). Best-effort: the
+    // flag exists either way; a failure is surfaced for the agent's brief.
+    let detail = result.detail;
+    const prereq = input.prerequisite as { flagKey?: unknown; variation?: unknown } | undefined;
+    if (prereq && typeof prereq === "object" && typeof prereq.flagKey === "string" && prereq.flagKey) {
+      const variation = prereq.variation === "off" ? "off" : "on";
+      try {
+        const note = await this.writer.addPrerequisite(key, prereq.flagKey, variation);
+        detail += ` ${note}`;
+      } catch (e) {
+        detail += ` PREREQUISITE NOT APPLIED (${e instanceof Error ? e.message : String(e)}) — the flag exists without it; record this in your brief.`;
+      }
+    }
+    return { content: detail };
   }
 
   /**

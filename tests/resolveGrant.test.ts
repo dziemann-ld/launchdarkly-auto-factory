@@ -7,7 +7,7 @@ describe("resolveGrant", () => {
   it("uses edge capabilities when present (source=edge)", () => {
     const r = resolveGrant("anything", ["create_flag", "edit_files"]);
     assert.deepEqual(r.grant, {
-      createFlag: true, createMetric: false, editFiles: true, writeManifest: false, stewardManifest: false, queryGraph: false, readDocs: false,
+      createFlag: true, createMetric: false, editFiles: true, writeManifest: false, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
     });
     assert.equal(r.source, "edge");
   });
@@ -15,7 +15,7 @@ describe("resolveGrant", () => {
   it("maps create_metric / write_manifest / steward_manifest from the edge list", () => {
     const r = resolveGrant("anything", ["create_metric", "edit_files", "write_manifest"]);
     assert.deepEqual(r.grant, {
-      createFlag: false, createMetric: true, editFiles: true, writeManifest: true, stewardManifest: false, queryGraph: false, readDocs: false,
+      createFlag: false, createMetric: true, editFiles: true, writeManifest: true, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
     });
     const s = resolveGrant("anything", ["steward_manifest"]);
     assert.equal(s.grant.stewardManifest, true);
@@ -26,7 +26,7 @@ describe("resolveGrant", () => {
   it("an empty edge list grants nothing (still source=edge, overrides fallback)", () => {
     const r = resolveGrant("autofactory-flag-implementer", []);
     assert.deepEqual(r.grant, {
-      createFlag: false, createMetric: false, editFiles: false, writeManifest: false, stewardManifest: false, queryGraph: false, readDocs: false,
+      createFlag: false, createMetric: false, editFiles: false, writeManifest: false, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
     });
     assert.equal(r.source, "edge");
   });
@@ -56,6 +56,9 @@ describe("resolveGrant", () => {
     // queryGraph rides the fallback too (ROOT can't receive edge grants); the
     // tool still only appears when a graph was composed for the run (KG flag).
     assert.equal(r.grant.queryGraph, true);
+    // Same for queryRepos: granted here, offered only when relatedRepos are
+    // registered and a GitHub token is present.
+    assert.equal(r.grant.queryRepos, true);
   });
 
   it("the steward gets steward_manifest via fallback", () => {

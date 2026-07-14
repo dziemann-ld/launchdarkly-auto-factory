@@ -42,6 +42,7 @@ import {
   getLdSdk,
   interpretWalk,
   intentIsDefault,
+  loadRelatedRepos,
   normalizeReleaseIntent,
   pipelineContext,
   resolveAiProvider,
@@ -105,6 +106,17 @@ function createAgentRunner(provider: string, kg?: AssembledGraph): AgentRunner {
   const codeChangesEnabled = process.env.ENABLE_CODE_CHANGES === "true";
   console.log(`Flag creation: ${writer ? `ENABLED → app project '${writer.projectKey}'` : "disabled"}.`);
   console.log(`Code changes (edit + commit/push): ${codeChangesEnabled ? "ENABLED" : "disabled"}.`);
+  // Cross-repo research (split-repo estates): the app repo opts in by
+  // registering relatedRepos in .autofactory/services.yaml. AUTOFACTORY_REPOS_TOKEN
+  // overrides the default token for private sibling repos.
+  const relatedRepos = loadRelatedRepos(sandboxRoot);
+  // `||` not `??`: an unset workflow secret arrives as an empty string.
+  const reposToken = process.env.AUTOFACTORY_REPOS_TOKEN || process.env.GITHUB_TOKEN;
+  if (relatedRepos.length > 0) {
+    console.log(
+      `Related repos: ${relatedRepos.length} registered (${relatedRepos.map((r) => r.repo).join(", ")})${reposToken ? "" : " — but no GitHub token; query_related_repos disabled"}.`,
+    );
+  }
   const localOpts = {
     sandboxRoot,
     codeChangesEnabled,
@@ -112,6 +124,7 @@ function createAgentRunner(provider: string, kg?: AssembledGraph): AgentRunner {
     ...(process.env.PR_BRANCH ? { prBranch: process.env.PR_BRANCH } : {}),
     ...(process.env.PR_BASE_REF ? { prBaseRef: process.env.PR_BASE_REF } : {}),
     ...(kg ? { knowledgeGraph: kg.graph, changedFiles: kg.changedFiles } : {}),
+    ...(relatedRepos.length > 0 && reposToken ? { relatedRepos, githubToken: reposToken } : {}),
   };
 
   if (provider === "cursor") {

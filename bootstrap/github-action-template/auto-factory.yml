@@ -70,3 +70,8 @@ jobs:
           # Approvals are controlled by the auto-factory-approval-mode /
           # -risk-threshold / -approval-gates flags in the factory project.
           github_token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          # Optional: token able to read PRIVATE repos registered under relatedRepos
+          # in .autofactory/services.yaml (cross-repo research). GITHUB_TOKEN covers
+          # public/same-repo reads without this.
+          AUTOFACTORY_REPOS_TOKEN: ${{ secrets.AUTOFACTORY_REPOS_TOKEN }}

@@ -33,6 +33,7 @@ import type { ModelListItem, SDKAgent, SDKCustomTool, SDKJsonValue, TokenUsage }
 import type { AgentNodeRequest, AgentNodeResult, AgentRunner, AgentStatus } from "../agentRunner.js";
 import { missingRequiredTags, modeNote, resolveGrant } from "../anthropic/anthropicAgentRunner.js";
 import type { KnowledgeGraph } from "../graph/schema.js";
+import { type RelatedRepo, RelatedReposClient } from "../github/relatedRepos.js";
 import type { LdResourceWriter } from "../anthropic/ldWriter.js";
 import {
   type AnthropicToolDef,
@@ -87,6 +88,10 @@ export interface CursorAgentRunnerOptions {
   knowledgeGraph?: KnowledgeGraph;
   /** Repo-relative files changed in this PR (blast-radius input). */
   changedFiles?: string[];
+  /** Related repos (query_related_repos) — same contract as the Anthropic runner. */
+  relatedRepos?: RelatedRepo[];
+  /** Token for cross-repo reads; falls back to GITHUB_TOKEN in the env. */
+  githubToken?: string;
 }
 
 /** Convert the shared sandbox tool defs into Cursor `customTools` backed by one executor. */
@@ -162,9 +167,14 @@ export class CursorAgentRunner implements AgentRunner {
       queryGraph: grant.queryGraph === true && this.opts.knowledgeGraph !== undefined,
       // Read-only; no global gate (fetch failures degrade inside the tool).
       readDocs: grant.readDocs === true,
+      // Read-only; globally enabled by a registered relatedRepos list + a token.
+      queryRepos:
+        grant.queryRepos === true &&
+        (this.opts.relatedRepos?.length ?? 0) > 0 &&
+        Boolean(this.opts.githubToken ?? process.env.GITHUB_TOKEN),
     };
     console.log(
-      `[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} → effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true}`,
+      `[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} queryRepos=${grant.queryRepos === true} → effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true} queryRepos=${caps.queryRepos === true}`,
     );
     const writer = caps.createFlag || caps.createMetric ? this.opts.writer : undefined;
 
@@ -180,6 +190,11 @@ export class CursorAgentRunner implements AgentRunner {
     );
     if (caps.queryGraph && this.opts.knowledgeGraph) {
       executor.provideKnowledgeGraph(this.opts.knowledgeGraph, this.opts.changedFiles ?? []);
+    }
+    if (caps.queryRepos && this.opts.relatedRepos) {
+      executor.provideRelatedRepos(
+        new RelatedReposClient(this.opts.relatedRepos, this.opts.githubToken ?? process.env.GITHUB_TOKEN ?? ""),
+      );
     }
     // LD variation tool attachments shape the interface within the capability
     // ceiling (ADR 0011) — same overlay as the Anthropic runner.

@@ -33122,8 +33122,8 @@ var init_sdk = __esm({
 
 // src/action.ts
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync5, readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname5, join as join6, resolve as resolve7 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname5, join as join7, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ../shared/dist/env.js
@@ -36288,7 +36288,16 @@ var CREATE_FLAG_TOOL = {
         enum: ["frontend", "backend", "fullstack"],
         description: "Deploy scope from the release manifest. frontend/fullstack flags are exposed to the client-side SDK; backend flags are server-only. When omitted, read from `.release-flags/pr-<N>.json` if present."
       },
-      tags: { type: "array", items: { type: "string" }, description: "Extra tags (auto-factory tags are added automatically)" }
+      tags: { type: "array", items: { type: "string" }, description: "Extra tags (auto-factory tags are added automatically)" },
+      prerequisite: {
+        type: "object",
+        description: "OPTIONAL flag dependency: attach a LaunchDarkly prerequisite so this flag can only serve treatment while the parent flag serves the given variation ('on' = true, default). Use ONLY when the research brief's prerequisite recommendation names a parent flag in the SAME LaunchDarkly project (cross-repo rollout coordination). Applied to every environment; the flag itself stays targeting-off. If the parent can't be found, flag creation still succeeds and the failure is reported back to you \u2014 surface it in your brief.",
+        properties: {
+          flagKey: { type: "string", description: "The parent flag key this flag depends on." },
+          variation: { type: "string", enum: ["on", "off"], description: "Parent variation required (default 'on')." }
+        },
+        required: ["flagKey"]
+      }
     },
     required: ["key"]
   }
@@ -36384,6 +36393,7 @@ var READ_LD_DOCS_TOOL = {
     required: ["path"]
   }
 };
+var REPO_MAX_FETCHES_PER_RUN = 15;
 var DOCS_HOST = "launchdarkly.com";
 var DOCS_MAX_BYTES = 25e3;
 var DOCS_MAX_FETCHES_PER_RUN = 8;
@@ -36435,6 +36445,30 @@ var QUERY_DEPENDENCIES_TOOL = {
     }
   }
 };
+var QUERY_RELATED_REPOS_TOOL = {
+  name: "query_related_repos",
+  description: "Query the estate's OTHER repositories, registered in .autofactory/services.yaml under relatedRepos \u2014 for split-repo estates where upstream/downstream services live outside this checkout. Call op='list' FIRST to see which repos exist and how each relates to this one (downstream = consumes this repo's surfaces; upstream = this repo consumes theirs). Then op='search' the relevant repos for the concrete surfaces this PR touches \u2014 endpoint paths, event names, shared types, LaunchDarkly flag keys \u2014 and op='read_file'/'list_dir' for exact contents. Cite repo+path evidence in your cross_repo_impact findings and prerequisite-flag recommendation. Search covers each repo's DEFAULT branch and may lag recent pushes: no hits is weak evidence, never proof of no impact. A failed call must not block your task \u2014 report the gap and continue.",
+  input_schema: {
+    type: "object",
+    properties: {
+      op: {
+        type: "string",
+        enum: ["list", "search", "read_file", "list_dir"],
+        description: "list = show the registry; search = code search in one repo; read_file / list_dir = fetch contents."
+      },
+      repo: {
+        type: "string",
+        description: "Registry key or owner/name of the related repo (required for search/read_file/list_dir)."
+      },
+      query: {
+        type: "string",
+        description: "For search: the term to find \u2014 an endpoint path ('/api/orders/cancel'), event name, type, or flag key."
+      },
+      path: { type: "string", description: "For read_file/list_dir: repo-relative path ('' lists the repo root)." }
+    },
+    required: ["op"]
+  }
+};
 var WRITE_MANIFEST_TOOL = {
   name: "write_manifest",
   description: "Create or update the release manifest (.release-flags/pr-<N>.json). Pass only the fields you own \u2014 they are MERGED into the existing file (agent fields: flagKey, scope, releasePlan.*). The human-editable releaseIntent block is auto-initialized on first write and PRESERVED on later writes (you cannot overwrite it). The file is validated, written as schema 1.1, and committed to the PR branch automatically \u2014 do not also edit it with write_file/edit_file.",
@@ -36454,6 +36488,7 @@ var SANDBOX_TOOL_DEFS = new Map([
   ...READONLY_TOOLS,
   READ_LD_DOCS_TOOL,
   QUERY_DEPENDENCIES_TOOL,
+  QUERY_RELATED_REPOS_TOOL,
   CREATE_FLAG_TOOL,
   CREATE_METRIC_TOOL,
   LIST_METRICS_TOOL,
@@ -36489,6 +36524,8 @@ function buildSandboxTools(caps) {
     tools.push(READ_LD_DOCS_TOOL);
   if (caps.queryGraph)
     tools.push(QUERY_DEPENDENCIES_TOOL);
+  if (caps.queryRepos)
+    tools.push(QUERY_RELATED_REPOS_TOOL);
   if (caps.createFlag)
     tools.push(CREATE_FLAG_TOOL);
   if (caps.createMetric)
@@ -36521,6 +36558,8 @@ var SandboxToolExecutor = class {
   knowledgeGraph;
   changedFiles = [];
   docsFetches = 0;
+  relatedRepos;
+  repoFetches = 0;
   /**
    * Supply the composed knowledge graph (ADR 0010) + the PR's changed files.
    * Only meaningful for nodes granted `queryGraph`; set after construction so
@@ -36529,6 +36568,13 @@ var SandboxToolExecutor = class {
   provideKnowledgeGraph(graph, changedFiles = []) {
     this.knowledgeGraph = graph;
     this.changedFiles = changedFiles;
+  }
+  /**
+   * Supply the cross-repo client (`query_related_repos`). Only meaningful for
+   * nodes granted `queryRepos`; set after construction like the knowledge graph.
+   */
+  provideRelatedRepos(client) {
+    this.relatedRepos = client;
   }
   constructor(root, writer, allowEdits = false, prBranch, prBaseRef, gitMode = "push", allowWriteManifest = false, stewardManifest = false) {
     this.root = root;
@@ -36572,6 +36618,8 @@ var SandboxToolExecutor = class {
           return this.writeManifestTool(String(input.path ?? ""), input.manifest);
         case "query_dependencies":
           return this.queryDependencies(input);
+        case "query_related_repos":
+          return await this.queryRelatedRepos(input);
         case "read_ld_docs":
           return await this.readLdDocs(String(input.path ?? ""), input.filter ? String(input.filter) : void 0);
         case "write_file":
@@ -36625,6 +36673,44 @@ var SandboxToolExecutor = class {
       via: `${h.via.kind} (${h.via.provenance}${h.via.evidence ? `: ${h.via.evidence}` : ""})`
     }));
     return { content: JSON.stringify({ node: nodeId, direction, hits, gaps: graph.gaps }, null, 1) };
+  }
+  /**
+   * `query_related_repos`: cross-repo research over the registered relatedRepos
+   * (split-repo estates). Bounded per run; every failure is an isError result
+   * the model reads and works around — cross-repo reads are never load-bearing.
+   */
+  async queryRelatedRepos(input) {
+    if (!this.relatedRepos) {
+      return {
+        content: "query_related_repos: no related repositories are registered for this run (relatedRepos in .autofactory/services.yaml) \u2014 reason from this repo's code only.",
+        isError: true
+      };
+    }
+    const op = String(input.op ?? "");
+    if (op === "list")
+      return { content: this.relatedRepos.list() };
+    if (this.repoFetches >= REPO_MAX_FETCHES_PER_RUN) {
+      return {
+        content: `query_related_repos: fetch budget (${REPO_MAX_FETCHES_PER_RUN}/run) exhausted \u2014 proceed with the evidence you have`,
+        isError: true
+      };
+    }
+    this.repoFetches += 1;
+    const repo = String(input.repo ?? "");
+    switch (op) {
+      case "search": {
+        const query = String(input.query ?? "").trim();
+        if (!query)
+          return { content: "query_related_repos: 'query' is required for op='search'", isError: true };
+        return { content: await this.relatedRepos.searchCode(repo, query) };
+      }
+      case "read_file":
+        return { content: await this.relatedRepos.readFile(repo, String(input.path ?? "")) };
+      case "list_dir":
+        return { content: await this.relatedRepos.listDir(repo, String(input.path ?? "")) };
+      default:
+        return { content: `query_related_repos: unknown op '${op}' (list|search|read_file|list_dir)`, isError: true };
+    }
   }
   /**
    * `read_ld_docs`: fetch an allowlisted LaunchDarkly docs page as markdown.
@@ -36759,7 +36845,18 @@ ${body}` };
     });
     this.tags.flag_created = "true";
     this.tags.flag_key = result.key;
-    return { content: result.detail };
+    let detail = result.detail;
+    const prereq = input.prerequisite;
+    if (prereq && typeof prereq === "object" && typeof prereq.flagKey === "string" && prereq.flagKey) {
+      const variation = prereq.variation === "off" ? "off" : "on";
+      try {
+        const note = await this.writer.addPrerequisite(key, prereq.flagKey, variation);
+        detail += ` ${note}`;
+      } catch (e) {
+        detail += ` PREREQUISITE NOT APPLIED (${e instanceof Error ? e.message : String(e)}) \u2014 the flag exists without it; record this in your brief.`;
+      }
+    }
+    return { content: detail };
   }
   /**
    * Scope for client-side SDK exposure: explicit `scope` arg, else the matching
@@ -37149,6 +37246,50 @@ var LdResourceWriter = class {
       detail: alreadyExists ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).${clientSideNote}` : `Created flag '${args.key}' in project '${this.ld.projectKey}'.${clientSideNote}`
     };
   }
+  /**
+   * Attach a prerequisite (parent flag at the required variation) to a flag in
+   * EVERY environment — cross-repo rollout coordination: the child can only
+   * serve treatment while the parent serves `variation`. Safe on a dark flag
+   * (targeting off), so creation-time wiring changes nothing until release.
+   * Idempotent: environments that already carry the prerequisite are skipped.
+   * Throws only when nothing could be applied (missing parent, no variation).
+   */
+  async addPrerequisite(childKey, parentKey, variation = "on") {
+    const want = variation === "on";
+    let parent;
+    try {
+      parent = await this.ld.getFlag(parentKey);
+    } catch {
+      throw new Error(`parent flag '${parentKey}' not found in project '${this.ld.projectKey}'`);
+    }
+    const parentVar = (parent.data.variations ?? []).find((v) => v.value === want);
+    if (!parentVar?._id) {
+      throw new Error(`parent flag '${parentKey}' has no boolean '${variation}' variation`);
+    }
+    const child = await this.ld.getFlag(childKey);
+    const envs = Object.entries(child.data.environments ?? {});
+    if (envs.length === 0)
+      throw new Error(`flag '${childKey}' reports no environments`);
+    const applied = [];
+    const failed = [];
+    for (const [env, cfg] of envs) {
+      if ((cfg?.prerequisites ?? []).some((p) => p?.key === parentKey)) {
+        applied.push(env);
+        continue;
+      }
+      try {
+        await this.ld.patchFlagSemantic(childKey, env, [{ kind: "addPrerequisite", key: parentKey, variationId: parentVar._id }], `AutoFactory: prerequisite ${parentKey}=${variation} (cross-repo rollout coordination)`);
+        applied.push(env);
+      } catch (e) {
+        failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (applied.length === 0) {
+      throw new Error(`prerequisite '${parentKey}' could not be applied to any environment (${failed.join("; ")})`);
+    }
+    const failNote = failed.length ? ` (failed in ${failed.join("; ")})` : "";
+    return `Prerequisite '${parentKey}'=${variation} attached in ${applied.length} environment(s): ${applied.join(", ")}.${failNote}`;
+  }
   /** Idempotent: turn on client-side ID availability for an existing flag. */
   async ensureClientSideAvailability(flagKey) {
     await this.ld.patchFlagProjectSemantic(flagKey, [{ kind: "turnOnClientSideAvailability", value: "usingEnvironmentId" }], "AutoFactory: expose frontend-scoped flag to client-side SDK");
@@ -37306,6 +37447,576 @@ function setGenAiAttributes(span, d) {
   }
 }
 
+// ../shared/dist/github/relatedRepos.js
+var import_yaml3 = __toESM(require_dist(), 1);
+import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
+import { join as join6 } from "node:path";
+
+// ../shared/dist/graph/assemble.js
+var import_yaml2 = __toESM(require_dist(), 1);
+import { execFileSync as execFileSync2, spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync3, mkdtempSync, readFileSync as readFileSync4, readdirSync as readdirSync3, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as join5, resolve as resolve6 } from "node:path";
+
+// ../shared/dist/graph/codeRefs.js
+var FLAG_COLUMNS = ["flagkey", "flag_key", "flag"];
+var PATH_COLUMNS = ["path", "filepath", "file"];
+var LINE_COLUMNS = ["startinglinenumber", "linenumber", "line"];
+function splitCsvLine(line) {
+  const out = [];
+  let field = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"' && line[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (ch === '"')
+        quoted = false;
+      else
+        field += ch;
+    } else if (ch === '"')
+      quoted = true;
+    else if (ch === ",") {
+      out.push(field);
+      field = "";
+    } else
+      field += ch;
+  }
+  out.push(field);
+  return out;
+}
+function parseCodeRefsCsv(csv) {
+  const lines = csv.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const headerLine = lines[0];
+  if (lines.length < 2 || headerLine === void 0)
+    return [];
+  const header = splitCsvLine(headerLine).map((h) => h.trim().toLowerCase().replace(/[^a-z_]/g, ""));
+  const col = (names) => header.findIndex((h) => names.includes(h));
+  const flagIdx = col(FLAG_COLUMNS);
+  const pathIdx = col(PATH_COLUMNS);
+  const lineIdx = col(LINE_COLUMNS);
+  if (flagIdx < 0 || pathIdx < 0)
+    return [];
+  const rows = [];
+  for (const line of lines.slice(1)) {
+    const cells = splitCsvLine(line);
+    const flagKey = cells[flagIdx]?.trim();
+    const path5 = cells[pathIdx]?.trim().replace(/^\/+/, "");
+    if (!flagKey || !path5)
+      continue;
+    const lineNo = lineIdx >= 0 ? Number.parseInt(cells[lineIdx] ?? "", 10) : Number.NaN;
+    rows.push({ flagKey, path: path5, ...Number.isFinite(lineNo) ? { line: lineNo } : {} });
+  }
+  return rows;
+}
+function codeRefEdges(rows) {
+  const byPair = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const key = `${row.flagKey} ${row.path}`;
+    const entry = byPair.get(key) ?? { flagKey: row.flagKey, path: row.path, lines: [] };
+    if (row.line !== void 0)
+      entry.lines.push(row.line);
+    byPair.set(key, entry);
+  }
+  return [...byPair.values()].map(({ flagKey, path: path5, lines }) => ({
+    src: flagNodeId(flagKey),
+    dst: fileNodeId(path5),
+    kind: "flag_wraps",
+    provenance: "code_refs",
+    evidence: lines.length ? `${path5}:${lines.sort((a, b) => a - b).join(",")}` : path5,
+    weight: Math.max(lines.length, 1)
+  }));
+}
+
+// ../shared/dist/graph/traceEdges.js
+function spanTargetHost(span) {
+  const a = span.traceAttributes;
+  const host = a?.server?.address ?? a?.url?.domain ?? a?.net?.peer?.name ?? (a?.url?.full ? safeHost(a.url.full) : void 0);
+  return host || void 0;
+}
+function safeHost(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return void 0;
+  }
+}
+function serviceForHost(services, host) {
+  const h = host.toLowerCase();
+  for (const svc of services) {
+    for (const declared of svc.hosts ?? []) {
+      const d = declared.toLowerCase();
+      if (h === d || h.includes(d))
+        return svc;
+    }
+  }
+  return services.find((s) => h === s.key.toLowerCase() || h.split(".")[0] === s.key.toLowerCase());
+}
+function deriveServiceEdges(spans, services) {
+  const known = new Map(services.map((s) => [s.key, s]));
+  const counts = /* @__PURE__ */ new Map();
+  for (const span of spans) {
+    if (span.spanKind !== "Client")
+      continue;
+    const caller = span.serviceName;
+    if (!caller || !known.has(caller))
+      continue;
+    const host = spanTargetHost(span);
+    if (!host)
+      continue;
+    const callee = serviceForHost(services, host);
+    if (!callee || callee.key === caller)
+      continue;
+    const key = `${caller}\0${callee.key}`;
+    const entry = counts.get(key) ?? { src: caller, dst: callee.key, host, n: 0 };
+    entry.n += 1;
+    counts.set(key, entry);
+  }
+  return [...counts.values()].map(({ src, dst, host, n }) => ({
+    src: serviceNodeId(src),
+    dst: serviceNodeId(dst),
+    kind: "service_calls",
+    provenance: "traces",
+    evidence: host,
+    weight: n
+  }));
+}
+
+// ../shared/dist/graph/compose.js
+var KNOWLEDGE_GRAPH_FLAG_KEY = "auto-factory-knowledge-graph";
+function composeGraph(inputs) {
+  const { services, spans = [], codeRefs = [], sha } = inputs;
+  const nodes = /* @__PURE__ */ new Map();
+  const gaps = [];
+  for (const svc of services) {
+    nodes.set(serviceNodeId(svc.key), {
+      id: serviceNodeId(svc.key),
+      kind: "service",
+      label: svc.key,
+      service: svc.key
+    });
+  }
+  const serviceEdges = deriveServiceEdges(spans, services);
+  if (spans.length === 0) {
+    gaps.push("traces: no span data \u2014 service_calls edges unavailable (telemetry gap or fetch skipped)");
+  } else {
+    const seen = new Set(spans.map((s) => s.serviceName).filter((n) => !!n && services.some((svc) => svc.key === n)));
+    for (const svc of services) {
+      if (!seen.has(svc.key))
+        gaps.push(`traces: no spans from service '${svc.key}' \u2014 its outbound calls are invisible`);
+    }
+  }
+  const flagEdges = codeRefEdges(codeRefs);
+  if (codeRefs.length === 0)
+    gaps.push("code_refs: no rows \u2014 flag_wraps edges unavailable");
+  for (const edge of flagEdges) {
+    if (!nodes.has(edge.src)) {
+      nodes.set(edge.src, { id: edge.src, kind: "flag", label: edge.src.replace(/^flag:/, "") });
+    }
+    if (!nodes.has(edge.dst)) {
+      const path5 = edge.dst.replace(/^file:/, "");
+      const svc = serviceForFile(services, path5);
+      nodes.set(edge.dst, {
+        id: edge.dst,
+        kind: "file",
+        label: path5,
+        ...svc ? { service: svc.key } : {}
+      });
+    }
+  }
+  return {
+    schema: 1,
+    ...sha ? { sha } : {},
+    services,
+    nodes: [...nodes.values()],
+    edges: [...serviceEdges, ...flagEdges],
+    gaps
+  };
+}
+
+// ../shared/dist/graph/o11yClient.js
+var DEFAULT_O11Y_MCP_URL = "https://mcp.launchdarkly.com/mcp/observability";
+function embeddedToolError(json) {
+  if (json.result?.structuredContent?.traces)
+    return void 0;
+  const text = json.result?.content?.find((c) => c.type === "text")?.text;
+  if (!text)
+    return void 0;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed.error)
+      return typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error);
+  } catch {
+  }
+  return void 0;
+}
+function toSpanRecord(node) {
+  return {
+    ...node.serviceName ? { serviceName: node.serviceName } : {},
+    ...node.spanKind ? { spanKind: node.spanKind } : {},
+    ...node.traceAttributes ? { traceAttributes: node.traceAttributes } : {}
+  };
+}
+async function mcpPost(url, apiKey, sessionId, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      // Bearer + a regular LD api- key works headlessly (verified live from
+      // CI). LD_O11Y_AUTH overrides the full header value if the gateway's
+      // scheme ever changes; failures degrade to a warning, never a blocked run.
+      Authorization: process.env.LD_O11Y_AUTH ?? `Bearer ${apiKey}`,
+      ...sessionId ? { "Mcp-Session-Id": sessionId } : {}
+    },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok)
+    throw new Error(`o11y MCP ${res.status} ${res.statusText}`);
+  const newSession = res.headers.get("mcp-session-id") ?? void 0;
+  const text = await res.text();
+  const payload = text.startsWith("event:") || text.startsWith("data:") ? text.split(/\r?\n/).find((l) => l.startsWith("data:"))?.slice(5).trim() ?? "{}" : text;
+  return { json: JSON.parse(payload), ...newSession ? { sessionId: newSession } : {} };
+}
+async function fetchRecentSpans(opts) {
+  const url = opts.url ?? process.env.LD_O11Y_MCP_URL ?? DEFAULT_O11Y_MCP_URL;
+  const windowHours = Math.min(opts.windowHours ?? 24, 24);
+  const retryDelaysMs = opts.retryDelaysMs ?? [500, 1500];
+  let lastError;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+    if (attempt > 0)
+      await new Promise((r) => setTimeout(r, retryDelaysMs[attempt - 1]));
+    try {
+      const spans = await fetchSpansOnce(url, opts, windowHours);
+      if (spans.length === 0) {
+        return {
+          spans,
+          warning: `no observability spans found for project '${opts.projectKey}' in the last ${windowHours}h \u2014 service-dependency edges unavailable. Instrument the services with the LaunchDarkly observability SDKs (and keep some traffic flowing) to light this up.`
+        };
+      }
+      return { spans };
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  const attempts = retryDelaysMs.length + 1;
+  return {
+    spans: [],
+    warning: `observability trace query failed after ${attempts} attempt${attempts === 1 ? "" : "s"} (${lastError instanceof Error ? lastError.message : String(lastError)}) \u2014 proceeding without service-dependency edges.`
+  };
+}
+async function fetchSpansOnce(url, opts, windowHours) {
+  const maxSpans = opts.maxSpans ?? 200;
+  const nowMs = (opts.now ?? (() => /* @__PURE__ */ new Date()))().getTime();
+  const startDate = new Date(nowMs - windowHours * 36e5).toISOString();
+  const init2 = await mcpPost(url, opts.apiKey, void 0, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "auto-factory-knowledge-graph", version: "1" }
+    }
+  });
+  const sessionId = init2.sessionId;
+  const spans = [];
+  let id = 2;
+  let hasNext = true;
+  while (hasNext && spans.length < maxSpans) {
+    const call = await mcpPost(url, opts.apiKey, sessionId, {
+      jsonrpc: "2.0",
+      id: id++,
+      method: "tools/call",
+      params: {
+        name: "query-traces",
+        arguments: { projectKey: opts.projectKey, startDate, limit: 50 }
+      }
+    });
+    if (call.json.error)
+      throw new Error(call.json.error.message ?? "o11y MCP tool error");
+    const embedded = embeddedToolError(call.json);
+    if (embedded)
+      throw new Error(embedded.slice(0, 200));
+    const traces = call.json.result?.structuredContent?.traces;
+    const nodes = (traces?.edges ?? []).map((e) => e.node).filter((n) => !!n);
+    spans.push(...nodes.map(toSpanRecord));
+    hasNext = traces?.pageInfo?.hasNextPage === true && nodes.length > 0;
+    if (nodes.length > 0)
+      break;
+  }
+  return spans;
+}
+
+// ../shared/dist/graph/assemble.js
+var SERVICES_FILE = ".autofactory/services.yaml";
+function parseServicesRegistry(yamlText) {
+  const doc = (0, import_yaml2.parse)(yamlText);
+  const services = [];
+  for (const [key, def] of Object.entries(doc?.services ?? {})) {
+    if (!def || typeof def !== "object")
+      continue;
+    const hosts = [...def.hosts ?? []];
+    if (def.statusUrl) {
+      try {
+        hosts.push(new URL(def.statusUrl).hostname);
+      } catch {
+      }
+    }
+    services.push({
+      key,
+      ...def.side ? { side: def.side } : {},
+      ...def.repo ? { repo: def.repo } : {},
+      ...def.dir ? { dir: def.dir } : {},
+      ...hosts.length ? { hosts } : {}
+    });
+  }
+  return services;
+}
+function changedFilesInCheckout(sandboxRoot, prBaseRef) {
+  const git2 = (args) => execFileSync2("git", args, { cwd: sandboxRoot, encoding: "utf8", timeout: 3e4 });
+  const name = prBaseRef || process.env.PR_BASE_REF || "main";
+  for (const ref of [`origin/${name}`, name, "origin/main", "main"]) {
+    try {
+      git2(["rev-parse", "--verify", "--quiet", ref]);
+      return git2(["diff", "--name-only", `${ref}...HEAD`]).split("\n").map((l) => l.trim()).filter(Boolean);
+    } catch {
+    }
+  }
+  return [];
+}
+function runFindCodeRefs(opts) {
+  const probe = spawnSync2("ld-find-code-refs", ["--version"], { encoding: "utf8", timeout: 15e3 });
+  if (probe.error || probe.status !== 0) {
+    return {
+      rows: [],
+      warning: "ld-find-code-refs binary not found on PATH \u2014 flag\u2192code wrap-point edges unavailable. Install it in the workflow (see bootstrap/github-action-template) to light this up."
+    };
+  }
+  const outDir = mkdtempSync(join5(tmpdir(), "af-coderefs-"));
+  try {
+    const run = spawnSync2("ld-find-code-refs", [
+      "--dir",
+      opts.sandboxRoot,
+      "--projKey",
+      opts.projectKey,
+      "--repoName",
+      opts.repoName ?? "pr-checkout",
+      "--dryRun",
+      "--outDir",
+      outDir
+    ], { encoding: "utf8", timeout: 12e4, env: { ...process.env, LD_ACCESS_TOKEN: opts.apiKey } });
+    if (run.error || run.status !== 0) {
+      const detail = `${run.stderr ?? ""}${run.stdout ?? ""}`.trim().slice(0, 300);
+      return { rows: [], warning: `ld-find-code-refs failed (${detail || "unknown error"}) \u2014 wrap-point edges unavailable.` };
+    }
+    const csvFile = readdirSync3(outDir).find((f) => f.endsWith(".csv"));
+    if (!csvFile)
+      return { rows: [], warning: "ld-find-code-refs produced no CSV \u2014 wrap-point edges unavailable." };
+    const csvText = readFileSync4(join5(outDir, csvFile), "utf8");
+    const rows = parseCodeRefsCsv(csvText);
+    return rows.length ? { rows, csvText } : { rows, csvText, warning: "ld-find-code-refs found no flag references in this checkout." };
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+}
+async function assembleKnowledgeGraph(opts) {
+  const warnings = [];
+  const root = resolve6(opts.sandboxRoot);
+  let services = [];
+  const registryPath = join5(root, SERVICES_FILE);
+  if (existsSync3(registryPath)) {
+    try {
+      services = parseServicesRegistry(readFileSync4(registryPath, "utf8"));
+      if (services.length === 0)
+        warnings.push(`${SERVICES_FILE} declares no services \u2014 file\u2192service attribution unavailable.`);
+    } catch (e) {
+      warnings.push(`${SERVICES_FILE} could not be parsed (${e instanceof Error ? e.message : String(e)}).`);
+    }
+  } else {
+    warnings.push(`no ${SERVICES_FILE} in the repo \u2014 service registry unavailable (service edges and file\u2192service attribution off). Commit one to enable the knowledge graph's service view.`);
+  }
+  let spans = [];
+  if (opts.o11y && services.length > 0) {
+    const fetched = await fetchRecentSpans({
+      apiKey: opts.o11y.apiKey,
+      projectKey: opts.o11y.projectKey,
+      ...opts.o11y.windowHours !== void 0 ? { windowHours: opts.o11y.windowHours } : {},
+      ...opts.o11y.retryDelaysMs !== void 0 ? { retryDelaysMs: opts.o11y.retryDelaysMs } : {}
+    });
+    spans = fetched.spans;
+    if (fetched.warning)
+      warnings.push(fetched.warning);
+  } else if (opts.o11y) {
+    warnings.push("skipping observability span fetch \u2014 no service registry to resolve span targets against.");
+  }
+  let codeRefRows = [];
+  if (opts.codeRefs) {
+    const refs = runFindCodeRefs({ sandboxRoot: root, ...opts.codeRefs });
+    codeRefRows = refs.rows;
+    if (refs.warning)
+      warnings.push(refs.warning);
+  }
+  const graph = composeGraph({
+    services,
+    spans,
+    codeRefs: codeRefRows,
+    ...opts.sha ? { sha: opts.sha } : {}
+  });
+  const changedFiles = changedFilesInCheckout(root, opts.prBaseRef);
+  return { graph, changedFiles, warnings };
+}
+
+// ../shared/dist/github/relatedRepos.js
+var RELATIONSHIPS = /* @__PURE__ */ new Set(["upstream", "downstream", "sibling"]);
+function parseRelatedRepos(yamlText) {
+  let doc;
+  try {
+    doc = (0, import_yaml3.parse)(yamlText);
+  } catch {
+    return [];
+  }
+  const repos = [];
+  for (const [key, def] of Object.entries(doc?.relatedRepos ?? {})) {
+    if (!def || typeof def !== "object" || typeof def.repo !== "string")
+      continue;
+    if (!/^[\w.-]+\/[\w.-]+$/.test(def.repo))
+      continue;
+    repos.push({
+      key,
+      repo: def.repo,
+      ...def.relationship && RELATIONSHIPS.has(def.relationship) ? { relationship: def.relationship } : {},
+      ...typeof def.description === "string" ? { description: def.description } : {}
+    });
+  }
+  return repos;
+}
+function loadRelatedRepos(sandboxRoot) {
+  const path5 = join6(sandboxRoot, SERVICES_FILE);
+  if (!existsSync4(path5))
+    return [];
+  try {
+    return parseRelatedRepos(readFileSync5(path5, "utf8"));
+  } catch {
+    return [];
+  }
+}
+var API_BASE = "https://api.github.com";
+var MAX_SEARCH_RESULTS = 8;
+var MAX_FILE_BYTES2 = 4e4;
+var MAX_DIR_ENTRIES = 100;
+var RelatedReposClient = class {
+  repos;
+  token;
+  apiBase;
+  constructor(repos, token, apiBase = process.env.GITHUB_API_URL ?? API_BASE) {
+    this.repos = repos;
+    this.token = token;
+    this.apiBase = apiBase;
+  }
+  /** Resolve a registry key or owner/name to a registered repo (never beyond the registry). */
+  resolve(ref) {
+    const r = ref.trim();
+    return this.repos.find((x) => x.key === r || x.repo.toLowerCase() === r.toLowerCase());
+  }
+  /** The registry, formatted for the model. */
+  list() {
+    const lines = this.repos.map((r) => {
+      const rel = r.relationship ? ` [${r.relationship}]` : "";
+      const desc = r.description ? ` \u2014 ${r.description}` : "";
+      return `- ${r.key} (${r.repo})${rel}${desc}`;
+    });
+    return `Registered related repositories (${this.repos.length}):
+${lines.join("\n")}
+relationship semantics: downstream = consumes this repo's surfaces; upstream = this repo consumes theirs; sibling = peer.`;
+  }
+  async gh(path5, accept = "application/vnd.github+json") {
+    const res = await fetch(`${this.apiBase}${path5}`, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        Accept: accept,
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    });
+    if (res.status === 404)
+      throw new Error(`not found (404) \u2014 check the path, or the token cannot see this repo`);
+    if (res.status === 403 || res.status === 401) {
+      throw new Error(`GitHub API ${res.status} \u2014 the run's token cannot read this repo (private repos need AUTOFACTORY_REPOS_TOKEN) or rate limit hit`);
+    }
+    if (!res.ok)
+      throw new Error(`GitHub API ${res.status} ${res.statusText}`);
+    return res.json();
+  }
+  /**
+   * Code search within one registered repo (GitHub search API — default branch
+   * only, index may lag very recent pushes). Returns matched paths with text
+   * fragments when available.
+   */
+  async searchCode(repoRef, query) {
+    const repo = this.mustResolve(repoRef);
+    const q = encodeURIComponent(`${query} repo:${repo.repo}`);
+    const data = await this.gh(`/search/code?q=${q}&per_page=${MAX_SEARCH_RESULTS}`, "application/vnd.github.text-match+json");
+    const items = (data.items ?? []).map((i) => ({
+      path: i.path ?? "?",
+      fragments: (i.text_matches ?? []).map((m) => m.fragment ?? "").filter(Boolean).slice(0, 3)
+    }));
+    if (items.length === 0) {
+      return `No code-search hits for '${query}' in ${repo.repo}. NOTE: search covers the DEFAULT branch and the index can lag; absence of hits is weak evidence \u2014 use list_dir/read_file to verify hot paths directly.`;
+    }
+    const shown = items.map((i) => `${repo.repo}:${i.path}
+${i.fragments.map((f) => "  | " + f.replace(/\n/g, "\n  | ")).join("\n")}`).join("\n\n");
+    const more = (data.total_count ?? items.length) > items.length ? `
+(${data.total_count} total matches; first ${items.length} shown)` : "";
+    return shown + more;
+  }
+  /** Fetch one file's text from a registered repo's default branch. */
+  async readFile(repoRef, path5) {
+    const repo = this.mustResolve(repoRef);
+    const clean = this.cleanPath(path5);
+    const data = await this.gh(`/repos/${repo.repo}/contents/${encodeURI(clean)}`);
+    if (Array.isArray(data))
+      throw new Error(`'${clean}' is a directory \u2014 use op='list_dir'`);
+    if (data.type !== "file" || typeof data.content !== "string") {
+      throw new Error(`'${clean}' in ${repo.repo} is not a readable file`);
+    }
+    const text = data.encoding === "base64" ? Buffer.from(data.content, "base64").toString("utf8") : data.content;
+    if (text.length > MAX_FILE_BYTES2) {
+      return text.slice(0, MAX_FILE_BYTES2) + `
+\u2026 [truncated at ${MAX_FILE_BYTES2} bytes of ${text.length}]`;
+    }
+    return text;
+  }
+  /** List a directory of a registered repo's default branch. */
+  async listDir(repoRef, path5) {
+    const repo = this.mustResolve(repoRef);
+    const clean = this.cleanPath(path5);
+    const data = await this.gh(`/repos/${repo.repo}/contents/${encodeURI(clean || "")}`);
+    if (!Array.isArray(data))
+      throw new Error(`'${clean}' is a file \u2014 use op='read_file'`);
+    const entries = data.slice(0, MAX_DIR_ENTRIES).map((e) => `${e.type === "dir" ? "d" : "f"} ${e.name ?? "?"}`);
+    const more = data.length > MAX_DIR_ENTRIES ? `
+\u2026 ${data.length - MAX_DIR_ENTRIES} more entries` : "";
+    return `${repo.repo}:${clean || "/"}
+${entries.join("\n")}${more}`;
+  }
+  mustResolve(ref) {
+    const repo = this.resolve(ref);
+    if (!repo) {
+      throw new Error(`'${ref}' is not a registered related repo. Registered: ${this.repos.map((r) => r.key).join(", ")} (use op='list')`);
+    }
+    return repo;
+  }
+  cleanPath(path5) {
+    const clean = path5.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+    if (clean.includes(".."))
+      throw new Error("invalid path");
+    return clean;
+  }
+};
+
 // ../shared/dist/anthropic/anthropicAgentRunner.js
 var TAGGING_NOTE = `
 
@@ -37320,6 +38031,9 @@ function modeNote(caps) {
   ];
   if (caps.queryGraph) {
     lines.push("You have `query_dependencies` \u2014 the estate's knowledge graph (service call edges observed from LaunchDarkly telemetry + flag\u2192code wrap points). Call it with NO arguments EARLY to get this PR's blast radius (changed services, dependent services at risk, upstream contracts, flags already on the changed code) and let it inform your classification and risk_score. Treat any entry in its `gaps` list as UNKNOWN coverage \u2014 a thin graph is never evidence of low impact.");
+  }
+  if (caps.queryRepos) {
+    lines.push("You have `query_related_repos` \u2014 the estate's OTHER repositories, registered by this repo (relatedRepos in .autofactory/services.yaml). Call op='list' EARLY, then SEARCH the relevant repos for the concrete surfaces this PR touches (endpoint paths, event names, shared types, flag keys) to establish upstream/downstream impact across the split estate. Report findings in a `cross_repo_impact` section of your research output \u2014 per repo: relationship, what is affected, and repo+path evidence \u2014 and, when a cross-repo dependency means this feature must not go live before a related repo's flag, name that flag in a `prerequisite_flag_recommendation` for the Flag Implementer (parent flag key + why; only flags in the SAME LaunchDarkly project can be wired as prerequisites \u2014 otherwise call it out as advisory). Fold cross-repo exposure into risk_score. No search hits is weak evidence, never proof of no impact.");
   }
   if (caps.readDocs) {
     lines.push("You have `read_ld_docs` \u2014 LaunchDarkly documentation pages as markdown. Consult it when UNCERTAIN about LaunchDarkly semantics or SDK syntax (never guess `track()`/evaluation syntax for a language the repo doesn't demonstrate); your instructions list the relevant pages, and 'llms.txt' is the full directory. Budget your fetches; a failed fetch must never block the task \u2014 fall back to the repo's existing patterns.");
@@ -37349,7 +38063,9 @@ var NODE_CAPABILITIES = {
   // handoffs), so the research planner's narrow manifest-write power lives here.
   // queryGraph: the planner's blast-radius input (ADR 0010) — only offered when
   // a graph was actually composed for the run (the KG flag gates that upstream).
-  "autofactory-research-planner": { createFlag: false, createMetric: false, editFiles: false, writeManifest: true, queryGraph: true },
+  // queryRepos: cross-repo impact for split-repo estates — only offered when the
+  // app repo registers relatedRepos in .autofactory/services.yaml.
+  "autofactory-research-planner": { createFlag: false, createMetric: false, editFiles: false, writeManifest: true, queryGraph: true, queryRepos: true },
   // The steward normalizes the human-edited releaseIntent — the only node that
   // may UPDATE an existing intent block.
   "autofactory-manifest-steward": { createFlag: false, createMetric: false, editFiles: false, stewardManifest: true },
@@ -37381,6 +38097,7 @@ var CAP_WRITE_MANIFEST = "write_manifest";
 var CAP_STEWARD_MANIFEST = "steward_manifest";
 var CAP_QUERY_GRAPH = "query_graph";
 var CAP_READ_DOCS = "read_docs";
+var CAP_QUERY_REPOS = "query_repos";
 function resolveGrant(configKey, capabilities) {
   if (capabilities) {
     return {
@@ -37391,7 +38108,8 @@ function resolveGrant(configKey, capabilities) {
         writeManifest: capabilities.includes(CAP_WRITE_MANIFEST),
         stewardManifest: capabilities.includes(CAP_STEWARD_MANIFEST),
         queryGraph: capabilities.includes(CAP_QUERY_GRAPH),
-        readDocs: capabilities.includes(CAP_READ_DOCS)
+        readDocs: capabilities.includes(CAP_READ_DOCS),
+        queryRepos: capabilities.includes(CAP_QUERY_REPOS)
       },
       source: "edge"
     };
@@ -37420,15 +38138,20 @@ var AnthropicAgentRunner = class {
       // Read-only; globally enabled by the presence of a composed graph (KG flag).
       queryGraph: grant.queryGraph === true && this.opts.knowledgeGraph !== void 0,
       // Read-only; no global gate (fetch failures degrade inside the tool).
-      readDocs: grant.readDocs === true
+      readDocs: grant.readDocs === true,
+      // Read-only; globally enabled by a registered relatedRepos list + a token.
+      queryRepos: grant.queryRepos === true && (this.opts.relatedRepos?.length ?? 0) > 0 && Boolean(this.opts.githubToken ?? process.env.GITHUB_TOKEN)
     };
-    console.log(`[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} \u2192 effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true}`);
+    console.log(`[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} queryRepos=${grant.queryRepos === true} \u2192 effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true} queryRepos=${caps.queryRepos === true}`);
     const writer = caps.createFlag || caps.createMetric ? this.opts.writer : void 0;
     const system = (req.instructions ?? "") + modeNote(caps);
     const model = anthropicModelId(req.model);
     const executor = new SandboxToolExecutor(this.opts.sandboxRoot, writer, caps.editFiles, this.opts.prBranch, this.opts.prBaseRef, this.opts.gitMode ?? "push", caps.writeManifest === true && this.opts.codeChangesEnabled === true, caps.stewardManifest === true && this.opts.codeChangesEnabled === true);
     if (caps.queryGraph && this.opts.knowledgeGraph) {
       executor.provideKnowledgeGraph(this.opts.knowledgeGraph, this.opts.changedFiles ?? []);
+    }
+    if (caps.queryRepos && this.opts.relatedRepos) {
+      executor.provideRelatedRepos(new RelatedReposClient(this.opts.relatedRepos, this.opts.githubToken ?? process.env.GITHUB_TOKEN ?? ""));
     }
     const overlay = applyLdToolOverlay(buildSandboxTools(caps), req.ldTools);
     if (overlay.unknown.length > 0) {
@@ -37666,13 +38389,18 @@ var CursorAgentRunner = class {
       // Read-only; globally enabled by the presence of a composed graph (KG flag).
       queryGraph: grant.queryGraph === true && this.opts.knowledgeGraph !== void 0,
       // Read-only; no global gate (fetch failures degrade inside the tool).
-      readDocs: grant.readDocs === true
+      readDocs: grant.readDocs === true,
+      // Read-only; globally enabled by a registered relatedRepos list + a token.
+      queryRepos: grant.queryRepos === true && (this.opts.relatedRepos?.length ?? 0) > 0 && Boolean(this.opts.githubToken ?? process.env.GITHUB_TOKEN)
     };
-    console.log(`[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} \u2192 effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true}`);
+    console.log(`[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} queryRepos=${grant.queryRepos === true} \u2192 effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true} queryRepos=${caps.queryRepos === true}`);
     const writer = caps.createFlag || caps.createMetric ? this.opts.writer : void 0;
     const executor = new SandboxToolExecutor(this.opts.sandboxRoot, writer, caps.editFiles, this.opts.prBranch, this.opts.prBaseRef, this.opts.gitMode ?? "push", caps.writeManifest === true && this.opts.codeChangesEnabled === true, caps.stewardManifest === true && this.opts.codeChangesEnabled === true);
     if (caps.queryGraph && this.opts.knowledgeGraph) {
       executor.provideKnowledgeGraph(this.opts.knowledgeGraph, this.opts.changedFiles ?? []);
+    }
+    if (caps.queryRepos && this.opts.relatedRepos) {
+      executor.provideRelatedRepos(new RelatedReposClient(this.opts.relatedRepos, this.opts.githubToken ?? process.env.GITHUB_TOKEN ?? ""));
     }
     const overlay = applyLdToolOverlay(buildSandboxTools(caps), req.ldTools);
     if (overlay.unknown.length > 0) {
@@ -37870,10 +38598,10 @@ ${evidence}`;
 }
 
 // ../shared/dist/judgeEvidence.js
-import { execFileSync as execFileSync2 } from "node:child_process";
+import { execFileSync as execFileSync3 } from "node:child_process";
 var MAX_EVIDENCE_CHARS = 24e3;
 function git(cwd, args) {
-  return execFileSync2("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return execFileSync3("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 function truncate2(s) {
   return s.length > MAX_EVIDENCE_CHARS ? `${s.slice(0, MAX_EVIDENCE_CHARS)}
@@ -38010,409 +38738,6 @@ Respond with ONLY a single JSON object matching this schema (no prose, no code f
       ...result.usage ? { tokens: { input: result.usage.inputTokens, output: result.usage.outputTokens, total: result.usage.totalTokens } } : {}
     };
   };
-}
-
-// ../shared/dist/graph/traceEdges.js
-function spanTargetHost(span) {
-  const a = span.traceAttributes;
-  const host = a?.server?.address ?? a?.url?.domain ?? a?.net?.peer?.name ?? (a?.url?.full ? safeHost(a.url.full) : void 0);
-  return host || void 0;
-}
-function safeHost(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return void 0;
-  }
-}
-function serviceForHost(services, host) {
-  const h = host.toLowerCase();
-  for (const svc of services) {
-    for (const declared of svc.hosts ?? []) {
-      const d = declared.toLowerCase();
-      if (h === d || h.includes(d))
-        return svc;
-    }
-  }
-  return services.find((s) => h === s.key.toLowerCase() || h.split(".")[0] === s.key.toLowerCase());
-}
-function deriveServiceEdges(spans, services) {
-  const known = new Map(services.map((s) => [s.key, s]));
-  const counts = /* @__PURE__ */ new Map();
-  for (const span of spans) {
-    if (span.spanKind !== "Client")
-      continue;
-    const caller = span.serviceName;
-    if (!caller || !known.has(caller))
-      continue;
-    const host = spanTargetHost(span);
-    if (!host)
-      continue;
-    const callee = serviceForHost(services, host);
-    if (!callee || callee.key === caller)
-      continue;
-    const key = `${caller}\0${callee.key}`;
-    const entry = counts.get(key) ?? { src: caller, dst: callee.key, host, n: 0 };
-    entry.n += 1;
-    counts.set(key, entry);
-  }
-  return [...counts.values()].map(({ src, dst, host, n }) => ({
-    src: serviceNodeId(src),
-    dst: serviceNodeId(dst),
-    kind: "service_calls",
-    provenance: "traces",
-    evidence: host,
-    weight: n
-  }));
-}
-
-// ../shared/dist/graph/codeRefs.js
-var FLAG_COLUMNS = ["flagkey", "flag_key", "flag"];
-var PATH_COLUMNS = ["path", "filepath", "file"];
-var LINE_COLUMNS = ["startinglinenumber", "linenumber", "line"];
-function splitCsvLine(line) {
-  const out = [];
-  let field = "";
-  let quoted = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (quoted) {
-      if (ch === '"' && line[i + 1] === '"') {
-        field += '"';
-        i++;
-      } else if (ch === '"')
-        quoted = false;
-      else
-        field += ch;
-    } else if (ch === '"')
-      quoted = true;
-    else if (ch === ",") {
-      out.push(field);
-      field = "";
-    } else
-      field += ch;
-  }
-  out.push(field);
-  return out;
-}
-function parseCodeRefsCsv(csv) {
-  const lines = csv.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  const headerLine = lines[0];
-  if (lines.length < 2 || headerLine === void 0)
-    return [];
-  const header = splitCsvLine(headerLine).map((h) => h.trim().toLowerCase().replace(/[^a-z_]/g, ""));
-  const col = (names) => header.findIndex((h) => names.includes(h));
-  const flagIdx = col(FLAG_COLUMNS);
-  const pathIdx = col(PATH_COLUMNS);
-  const lineIdx = col(LINE_COLUMNS);
-  if (flagIdx < 0 || pathIdx < 0)
-    return [];
-  const rows = [];
-  for (const line of lines.slice(1)) {
-    const cells = splitCsvLine(line);
-    const flagKey = cells[flagIdx]?.trim();
-    const path5 = cells[pathIdx]?.trim().replace(/^\/+/, "");
-    if (!flagKey || !path5)
-      continue;
-    const lineNo = lineIdx >= 0 ? Number.parseInt(cells[lineIdx] ?? "", 10) : Number.NaN;
-    rows.push({ flagKey, path: path5, ...Number.isFinite(lineNo) ? { line: lineNo } : {} });
-  }
-  return rows;
-}
-function codeRefEdges(rows) {
-  const byPair = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    const key = `${row.flagKey} ${row.path}`;
-    const entry = byPair.get(key) ?? { flagKey: row.flagKey, path: row.path, lines: [] };
-    if (row.line !== void 0)
-      entry.lines.push(row.line);
-    byPair.set(key, entry);
-  }
-  return [...byPair.values()].map(({ flagKey, path: path5, lines }) => ({
-    src: flagNodeId(flagKey),
-    dst: fileNodeId(path5),
-    kind: "flag_wraps",
-    provenance: "code_refs",
-    evidence: lines.length ? `${path5}:${lines.sort((a, b) => a - b).join(",")}` : path5,
-    weight: Math.max(lines.length, 1)
-  }));
-}
-
-// ../shared/dist/graph/compose.js
-var KNOWLEDGE_GRAPH_FLAG_KEY = "auto-factory-knowledge-graph";
-function composeGraph(inputs) {
-  const { services, spans = [], codeRefs = [], sha } = inputs;
-  const nodes = /* @__PURE__ */ new Map();
-  const gaps = [];
-  for (const svc of services) {
-    nodes.set(serviceNodeId(svc.key), {
-      id: serviceNodeId(svc.key),
-      kind: "service",
-      label: svc.key,
-      service: svc.key
-    });
-  }
-  const serviceEdges = deriveServiceEdges(spans, services);
-  if (spans.length === 0) {
-    gaps.push("traces: no span data \u2014 service_calls edges unavailable (telemetry gap or fetch skipped)");
-  } else {
-    const seen = new Set(spans.map((s) => s.serviceName).filter((n) => !!n && services.some((svc) => svc.key === n)));
-    for (const svc of services) {
-      if (!seen.has(svc.key))
-        gaps.push(`traces: no spans from service '${svc.key}' \u2014 its outbound calls are invisible`);
-    }
-  }
-  const flagEdges = codeRefEdges(codeRefs);
-  if (codeRefs.length === 0)
-    gaps.push("code_refs: no rows \u2014 flag_wraps edges unavailable");
-  for (const edge of flagEdges) {
-    if (!nodes.has(edge.src)) {
-      nodes.set(edge.src, { id: edge.src, kind: "flag", label: edge.src.replace(/^flag:/, "") });
-    }
-    if (!nodes.has(edge.dst)) {
-      const path5 = edge.dst.replace(/^file:/, "");
-      const svc = serviceForFile(services, path5);
-      nodes.set(edge.dst, {
-        id: edge.dst,
-        kind: "file",
-        label: path5,
-        ...svc ? { service: svc.key } : {}
-      });
-    }
-  }
-  return {
-    schema: 1,
-    ...sha ? { sha } : {},
-    services,
-    nodes: [...nodes.values()],
-    edges: [...serviceEdges, ...flagEdges],
-    gaps
-  };
-}
-
-// ../shared/dist/graph/o11yClient.js
-var DEFAULT_O11Y_MCP_URL = "https://mcp.launchdarkly.com/mcp/observability";
-function embeddedToolError(json) {
-  if (json.result?.structuredContent?.traces)
-    return void 0;
-  const text = json.result?.content?.find((c) => c.type === "text")?.text;
-  if (!text)
-    return void 0;
-  try {
-    const parsed = JSON.parse(text);
-    if (parsed.error)
-      return typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error);
-  } catch {
-  }
-  return void 0;
-}
-function toSpanRecord(node) {
-  return {
-    ...node.serviceName ? { serviceName: node.serviceName } : {},
-    ...node.spanKind ? { spanKind: node.spanKind } : {},
-    ...node.traceAttributes ? { traceAttributes: node.traceAttributes } : {}
-  };
-}
-async function mcpPost(url, apiKey, sessionId, body) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
-      // Bearer + a regular LD api- key works headlessly (verified live from
-      // CI). LD_O11Y_AUTH overrides the full header value if the gateway's
-      // scheme ever changes; failures degrade to a warning, never a blocked run.
-      Authorization: process.env.LD_O11Y_AUTH ?? `Bearer ${apiKey}`,
-      ...sessionId ? { "Mcp-Session-Id": sessionId } : {}
-    },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok)
-    throw new Error(`o11y MCP ${res.status} ${res.statusText}`);
-  const newSession = res.headers.get("mcp-session-id") ?? void 0;
-  const text = await res.text();
-  const payload = text.startsWith("event:") || text.startsWith("data:") ? text.split(/\r?\n/).find((l) => l.startsWith("data:"))?.slice(5).trim() ?? "{}" : text;
-  return { json: JSON.parse(payload), ...newSession ? { sessionId: newSession } : {} };
-}
-async function fetchRecentSpans(opts) {
-  const url = opts.url ?? process.env.LD_O11Y_MCP_URL ?? DEFAULT_O11Y_MCP_URL;
-  const windowHours = Math.min(opts.windowHours ?? 24, 24);
-  const maxSpans = opts.maxSpans ?? 200;
-  const nowMs = (opts.now ?? (() => /* @__PURE__ */ new Date()))().getTime();
-  const startDate = new Date(nowMs - windowHours * 36e5).toISOString();
-  try {
-    const init2 = await mcpPost(url, opts.apiKey, void 0, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-03-26",
-        capabilities: {},
-        clientInfo: { name: "auto-factory-knowledge-graph", version: "1" }
-      }
-    });
-    const sessionId = init2.sessionId;
-    const spans = [];
-    let id = 2;
-    let hasNext = true;
-    while (hasNext && spans.length < maxSpans) {
-      const call = await mcpPost(url, opts.apiKey, sessionId, {
-        jsonrpc: "2.0",
-        id: id++,
-        method: "tools/call",
-        params: {
-          name: "query-traces",
-          arguments: { projectKey: opts.projectKey, startDate, limit: 50 }
-        }
-      });
-      if (call.json.error)
-        throw new Error(call.json.error.message ?? "o11y MCP tool error");
-      const embedded = embeddedToolError(call.json);
-      if (embedded)
-        throw new Error(embedded.slice(0, 200));
-      const traces = call.json.result?.structuredContent?.traces;
-      const nodes = (traces?.edges ?? []).map((e) => e.node).filter((n) => !!n);
-      spans.push(...nodes.map(toSpanRecord));
-      hasNext = traces?.pageInfo?.hasNextPage === true && nodes.length > 0;
-      if (nodes.length > 0)
-        break;
-    }
-    if (spans.length === 0) {
-      return {
-        spans,
-        warning: `no observability spans found for project '${opts.projectKey}' in the last ${windowHours}h \u2014 service-dependency edges unavailable. Instrument the services with the LaunchDarkly observability SDKs (and keep some traffic flowing) to light this up.`
-      };
-    }
-    return { spans };
-  } catch (e) {
-    return {
-      spans: [],
-      warning: `observability trace query failed (${e instanceof Error ? e.message : String(e)}) \u2014 proceeding without service-dependency edges.`
-    };
-  }
-}
-
-// ../shared/dist/graph/assemble.js
-var import_yaml2 = __toESM(require_dist(), 1);
-import { execFileSync as execFileSync3, spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync3, mkdtempSync, readFileSync as readFileSync4, readdirSync as readdirSync3, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join as join5, resolve as resolve6 } from "node:path";
-var SERVICES_FILE = ".autofactory/services.yaml";
-function parseServicesRegistry(yamlText) {
-  const doc = (0, import_yaml2.parse)(yamlText);
-  const services = [];
-  for (const [key, def] of Object.entries(doc?.services ?? {})) {
-    if (!def || typeof def !== "object")
-      continue;
-    const hosts = [...def.hosts ?? []];
-    if (def.statusUrl) {
-      try {
-        hosts.push(new URL(def.statusUrl).hostname);
-      } catch {
-      }
-    }
-    services.push({
-      key,
-      ...def.side ? { side: def.side } : {},
-      ...def.repo ? { repo: def.repo } : {},
-      ...def.dir ? { dir: def.dir } : {},
-      ...hosts.length ? { hosts } : {}
-    });
-  }
-  return services;
-}
-function changedFilesInCheckout(sandboxRoot, prBaseRef) {
-  const git2 = (args) => execFileSync3("git", args, { cwd: sandboxRoot, encoding: "utf8", timeout: 3e4 });
-  const name = prBaseRef || process.env.PR_BASE_REF || "main";
-  for (const ref of [`origin/${name}`, name, "origin/main", "main"]) {
-    try {
-      git2(["rev-parse", "--verify", "--quiet", ref]);
-      return git2(["diff", "--name-only", `${ref}...HEAD`]).split("\n").map((l) => l.trim()).filter(Boolean);
-    } catch {
-    }
-  }
-  return [];
-}
-function runFindCodeRefs(opts) {
-  const probe = spawnSync2("ld-find-code-refs", ["--version"], { encoding: "utf8", timeout: 15e3 });
-  if (probe.error || probe.status !== 0) {
-    return {
-      rows: [],
-      warning: "ld-find-code-refs binary not found on PATH \u2014 flag\u2192code wrap-point edges unavailable. Install it in the workflow (see bootstrap/github-action-template) to light this up."
-    };
-  }
-  const outDir = mkdtempSync(join5(tmpdir(), "af-coderefs-"));
-  try {
-    const run = spawnSync2("ld-find-code-refs", [
-      "--dir",
-      opts.sandboxRoot,
-      "--projKey",
-      opts.projectKey,
-      "--repoName",
-      opts.repoName ?? "pr-checkout",
-      "--dryRun",
-      "--outDir",
-      outDir
-    ], { encoding: "utf8", timeout: 12e4, env: { ...process.env, LD_ACCESS_TOKEN: opts.apiKey } });
-    if (run.error || run.status !== 0) {
-      const detail = `${run.stderr ?? ""}${run.stdout ?? ""}`.trim().slice(0, 300);
-      return { rows: [], warning: `ld-find-code-refs failed (${detail || "unknown error"}) \u2014 wrap-point edges unavailable.` };
-    }
-    const csvFile = readdirSync3(outDir).find((f) => f.endsWith(".csv"));
-    if (!csvFile)
-      return { rows: [], warning: "ld-find-code-refs produced no CSV \u2014 wrap-point edges unavailable." };
-    const csvText = readFileSync4(join5(outDir, csvFile), "utf8");
-    const rows = parseCodeRefsCsv(csvText);
-    return rows.length ? { rows, csvText } : { rows, csvText, warning: "ld-find-code-refs found no flag references in this checkout." };
-  } finally {
-    rmSync(outDir, { recursive: true, force: true });
-  }
-}
-async function assembleKnowledgeGraph(opts) {
-  const warnings = [];
-  const root = resolve6(opts.sandboxRoot);
-  let services = [];
-  const registryPath = join5(root, SERVICES_FILE);
-  if (existsSync3(registryPath)) {
-    try {
-      services = parseServicesRegistry(readFileSync4(registryPath, "utf8"));
-      if (services.length === 0)
-        warnings.push(`${SERVICES_FILE} declares no services \u2014 file\u2192service attribution unavailable.`);
-    } catch (e) {
-      warnings.push(`${SERVICES_FILE} could not be parsed (${e instanceof Error ? e.message : String(e)}).`);
-    }
-  } else {
-    warnings.push(`no ${SERVICES_FILE} in the repo \u2014 service registry unavailable (service edges and file\u2192service attribution off). Commit one to enable the knowledge graph's service view.`);
-  }
-  let spans = [];
-  if (opts.o11y && services.length > 0) {
-    const fetched = await fetchRecentSpans({
-      apiKey: opts.o11y.apiKey,
-      projectKey: opts.o11y.projectKey,
-      ...opts.o11y.windowHours !== void 0 ? { windowHours: opts.o11y.windowHours } : {}
-    });
-    spans = fetched.spans;
-    if (fetched.warning)
-      warnings.push(fetched.warning);
-  } else if (opts.o11y) {
-    warnings.push("skipping observability span fetch \u2014 no service registry to resolve span targets against.");
-  }
-  let codeRefRows = [];
-  if (opts.codeRefs) {
-    const refs = runFindCodeRefs({ sandboxRoot: root, ...opts.codeRefs });
-    codeRefRows = refs.rows;
-    if (refs.warning)
-      warnings.push(refs.warning);
-  }
-  const graph = composeGraph({
-    services,
-    spans,
-    codeRefs: codeRefRows,
-    ...opts.sha ? { sha: opts.sha } : {}
-  });
-  const changedFiles = changedFilesInCheckout(root, opts.prBaseRef);
-  return { graph, changedFiles, warnings };
 }
 
 // src/checkRun.ts
@@ -38562,16 +38887,16 @@ async function fetchApprovalActor(repo, prNumber, token) {
 }
 
 // src/prContext.ts
-import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync6 } from "node:fs";
 function assemblePrContext() {
   const ctx = {
     REPO: process.env.GITHUB_REPOSITORY,
     SHA: process.env.GITHUB_SHA
   };
   const eventPath = process.env.GITHUB_EVENT_PATH;
-  if (eventPath && existsSync4(eventPath)) {
+  if (eventPath && existsSync5(eventPath)) {
     try {
-      const event = JSON.parse(readFileSync5(eventPath, "utf8"));
+      const event = JSON.parse(readFileSync6(eventPath, "utf8"));
       const pr = event.pull_request;
       if (pr) {
         if (pr.number !== void 0) ctx.PR_NUMBER = String(pr.number);
@@ -38619,13 +38944,21 @@ function createAgentRunner(provider, kg) {
   const codeChangesEnabled = process.env.ENABLE_CODE_CHANGES === "true";
   console.log(`Flag creation: ${writer ? `ENABLED \u2192 app project '${writer.projectKey}'` : "disabled"}.`);
   console.log(`Code changes (edit + commit/push): ${codeChangesEnabled ? "ENABLED" : "disabled"}.`);
+  const relatedRepos = loadRelatedRepos(sandboxRoot);
+  const reposToken = process.env.AUTOFACTORY_REPOS_TOKEN || process.env.GITHUB_TOKEN;
+  if (relatedRepos.length > 0) {
+    console.log(
+      `Related repos: ${relatedRepos.length} registered (${relatedRepos.map((r) => r.repo).join(", ")})${reposToken ? "" : " \u2014 but no GitHub token; query_related_repos disabled"}.`
+    );
+  }
   const localOpts = {
     sandboxRoot,
     codeChangesEnabled,
     ...writer ? { writer } : {},
     ...process.env.PR_BRANCH ? { prBranch: process.env.PR_BRANCH } : {},
     ...process.env.PR_BASE_REF ? { prBaseRef: process.env.PR_BASE_REF } : {},
-    ...kg ? { knowledgeGraph: kg.graph, changedFiles: kg.changedFiles } : {}
+    ...kg ? { knowledgeGraph: kg.graph, changedFiles: kg.changedFiles } : {},
+    ...relatedRepos.length > 0 && reposToken ? { relatedRepos, githubToken: reposToken } : {}
   };
   if (provider === "cursor") {
     return new CursorAgentRunner({
@@ -38675,9 +39008,9 @@ async function reviewManifestIntent(opts) {
   try {
     if (!opts.prNumber) return {};
     const rel = `.release-flags/pr-${opts.prNumber}.json`;
-    const abs = join6(opts.sandboxRoot, rel);
-    if (!existsSync5(abs)) return {};
-    const manifest = JSON.parse(readFileSync6(abs, "utf8"));
+    const abs = join7(opts.sandboxRoot, rel);
+    if (!existsSync6(abs)) return {};
+    const manifest = JSON.parse(readFileSync7(abs, "utf8"));
     const { intent, issues } = normalizeReleaseIntent(manifest.releaseIntent);
     if (opts.gatesCleared && !intent.approvedBy) {
       const actor = await fetchApprovalActor(opts.repo, opts.prNumber, process.env.GITHUB_TOKEN);
@@ -38783,12 +39116,12 @@ function mapActionInputs() {
 async function detectConfigDrift(graphKey) {
   try {
     const repoRoot = resolve7(dirname5(fileURLToPath(import.meta.url)), "../../..");
-    const base = join6(repoRoot, "config", "agentcontrol");
+    const base = join7(repoRoot, "config", "agentcontrol");
     const local = computeConfigHash({
-      aiConfigsDir: join6(base, "ai-configs"),
-      graphsDir: join6(base, "graphs"),
-      flagsDir: join6(base, "flags"),
-      toolsDir: join6(base, "tools")
+      aiConfigsDir: join7(base, "ai-configs"),
+      graphsDir: join7(base, "graphs"),
+      flagsDir: join7(base, "flags"),
+      toolsDir: join7(base, "tools")
     });
     if (!local) return void 0;
     const graph = await new LdClient(targetConnection()).getAgentGraph(graphKey);

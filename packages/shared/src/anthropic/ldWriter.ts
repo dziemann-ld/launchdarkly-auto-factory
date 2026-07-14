@@ -126,6 +126,59 @@ export class LdResourceWriter {
     };
   }
 
+  /**
+   * Attach a prerequisite (parent flag at the required variation) to a flag in
+   * EVERY environment — cross-repo rollout coordination: the child can only
+   * serve treatment while the parent serves `variation`. Safe on a dark flag
+   * (targeting off), so creation-time wiring changes nothing until release.
+   * Idempotent: environments that already carry the prerequisite are skipped.
+   * Throws only when nothing could be applied (missing parent, no variation).
+   */
+  async addPrerequisite(childKey: string, parentKey: string, variation: "on" | "off" = "on"): Promise<string> {
+    const want = variation === "on";
+    let parent: { data: { variations?: Array<{ _id?: string; value?: unknown }> } };
+    try {
+      parent = await this.ld.getFlag(parentKey);
+    } catch {
+      throw new Error(`parent flag '${parentKey}' not found in project '${this.ld.projectKey}'`);
+    }
+    const parentVar = (parent.data.variations ?? []).find((v) => v.value === want);
+    if (!parentVar?._id) {
+      throw new Error(`parent flag '${parentKey}' has no boolean '${variation}' variation`);
+    }
+
+    const child = await this.ld.getFlag<{
+      environments?: Record<string, { prerequisites?: Array<{ key?: string }> }>;
+    }>(childKey);
+    const envs = Object.entries(child.data.environments ?? {});
+    if (envs.length === 0) throw new Error(`flag '${childKey}' reports no environments`);
+
+    const applied: string[] = [];
+    const failed: string[] = [];
+    for (const [env, cfg] of envs) {
+      if ((cfg?.prerequisites ?? []).some((p) => p?.key === parentKey)) {
+        applied.push(env); // already wired (PR re-run)
+        continue;
+      }
+      try {
+        await this.ld.patchFlagSemantic(
+          childKey,
+          env,
+          [{ kind: "addPrerequisite", key: parentKey, variationId: parentVar._id }],
+          `AutoFactory: prerequisite ${parentKey}=${variation} (cross-repo rollout coordination)`,
+        );
+        applied.push(env);
+      } catch (e) {
+        failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (applied.length === 0) {
+      throw new Error(`prerequisite '${parentKey}' could not be applied to any environment (${failed.join("; ")})`);
+    }
+    const failNote = failed.length ? ` (failed in ${failed.join("; ")})` : "";
+    return `Prerequisite '${parentKey}'=${variation} attached in ${applied.length} environment(s): ${applied.join(", ")}.${failNote}`;
+  }
+
   /** Idempotent: turn on client-side ID availability for an existing flag. */
   private async ensureClientSideAvailability(flagKey: string): Promise<void> {
     await this.ld.patchFlagProjectSemantic(

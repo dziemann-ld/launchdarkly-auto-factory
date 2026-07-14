@@ -32,6 +32,27 @@
           "type": "string"
         },
         "description": "Extra tags (auto-factory tags are added automatically)"
+      },
+      "prerequisite": {
+        "type": "object",
+        "description": "OPTIONAL flag dependency: attach a LaunchDarkly prerequisite so this flag can only serve treatment while the parent flag serves the given variation ('on' = true, default). Use ONLY when the research brief's prerequisite recommendation names a parent flag in the SAME LaunchDarkly project (cross-repo rollout coordination). Applied to every environment; the flag itself stays targeting-off. If the parent can't be found, flag creation still succeeds and the failure is reported back to you — surface it in your brief.",
+        "properties": {
+          "flagKey": {
+            "type": "string",
+            "description": "The parent flag key this flag depends on."
+          },
+          "variation": {
+            "type": "string",
+            "enum": [
+              "on",
+              "off"
+            ],
+            "description": "Parent variation required (default 'on')."
+          }
+        },
+        "required": [
+          "flagKey"
+        ]
       }
     },
     "required": [

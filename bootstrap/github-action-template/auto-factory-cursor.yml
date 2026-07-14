@@ -78,3 +78,6 @@ jobs:
           PR_BRANCH:            ${{ github.event.pull_request.head.ref }}
           PR_BASE_REF:          ${{ github.event.pull_request.base.ref }}
           GITHUB_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
+          # Optional: token able to read PRIVATE repos registered under relatedRepos
+          # in .autofactory/services.yaml (cross-repo research).
+          AUTOFACTORY_REPOS_TOKEN: ${{ secrets.AUTOFACTORY_REPOS_TOKEN }}

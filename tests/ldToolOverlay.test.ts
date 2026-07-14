@@ -10,9 +10,9 @@ const FULL_CAPS = {
 
 describe("LD tool overlay (ADR 0011)", () => {
   it("registry covers every capability-buildable tool", () => {
-    const built = buildSandboxTools({ ...FULL_CAPS, queryGraph: true });
+    const built = buildSandboxTools({ ...FULL_CAPS, queryGraph: true, queryRepos: true });
     for (const t of built) assert.ok(SANDBOX_TOOL_DEFS.has(t.name), `registry missing ${t.name}`);
-    assert.equal(SANDBOX_TOOL_DEFS.size, 15);
+    assert.equal(SANDBOX_TOOL_DEFS.size, 16);
   });
 
   it("no attachments → built-in defaults, unchanged (pre-tools projects)", () => {
