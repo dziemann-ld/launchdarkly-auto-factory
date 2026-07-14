@@ -70,6 +70,9 @@ export function loadRelatedRepos(sandboxRoot: string): RelatedRepo[] {
 }
 
 const API_BASE = "https://api.github.com";
+const RATE_LIMIT_RETRIES = 2;
+const RATE_LIMIT_DEFAULT_WAIT_MS = 30_000;
+const RATE_LIMIT_MAX_WAIT_MS = 65_000;
 const MAX_SEARCH_RESULTS = 8;
 const MAX_FILE_BYTES = 40_000;
 const MAX_DIR_ENTRIES = 100;
@@ -108,21 +111,50 @@ export class RelatedReposClient {
   }
 
   private async gh(path: string, accept = "application/vnd.github+json"): Promise<unknown> {
-    const res = await fetch(`${this.apiBase}${path}`, {
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        Accept: accept,
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (res.status === 404) throw new Error(`not found (404) — check the path, or the token cannot see this repo`);
-    if (res.status === 403 || res.status === 401) {
-      throw new Error(
-        `GitHub API ${res.status} — the run's token cannot read this repo (private repos need AUTOFACTORY_REPOS_TOKEN) or rate limit hit`,
-      );
+    // Rate limits (search: 10/min; secondary limits on bursts) killed live run
+    // PR #11's evidence-gathering — wait out up to two rate-limit responses
+    // (Retry-After-aware, capped) before giving up. Auth failures don't retry.
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(`${this.apiBase}${path}`, {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: accept,
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      });
+      if (res.status === 404) throw new Error(`not found (404) — check the path, or the token cannot see this repo`);
+
+      const rateLimited =
+        res.status === 429 ||
+        (res.status === 403 &&
+          (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.get("retry-after") !== null));
+      if (rateLimited && attempt < RATE_LIMIT_RETRIES) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        const resetAt = Number(res.headers.get("x-ratelimit-reset")) * 1000;
+        const waitMs = Math.min(
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? retryAfter * 1000
+            : resetAt > Date.now()
+              ? resetAt - Date.now() + 1000
+              : RATE_LIMIT_DEFAULT_WAIT_MS,
+          RATE_LIMIT_MAX_WAIT_MS,
+        );
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+      if (rateLimited) {
+        throw new Error(
+          `GitHub API rate limit persisted after ${RATE_LIMIT_RETRIES} waits — prefer read_file/list_dir (higher limits than search), or proceed with the evidence you have`,
+        );
+      }
+      if (res.status === 403 || res.status === 401) {
+        throw new Error(
+          `GitHub API ${res.status} — the run's token cannot read this repo (private repos need AUTOFACTORY_REPOS_TOKEN)`,
+        );
+      }
+      if (!res.ok) throw new Error(`GitHub API ${res.status} ${res.statusText}`);
+      return res.json();
     }
-    if (!res.ok) throw new Error(`GitHub API ${res.status} ${res.statusText}`);
-    return res.json();
   }
 
   /**

@@ -15,7 +15,32 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
-## 2026-07-14
+## 2026-07-14 (later)
+
+### ✅ Prerequisite wiring v2: on-behind-parent semantics + fixes from the first live runs
+- **Postmortem (app PR #11 + admin PR #1, first live ADR-0012 runs):** both runs found
+  the cross-repo dependency but neither wired the prerequisite. PR #11: the planner got
+  GitHub-rate-limited mid-research, never confirmed the parent key, and wrote advisory
+  PROSE into the manifest's `releasePlan.prerequisites[].flagKey`. Admin PR #1: the
+  planner named `enable-payment-intents` correctly but the implementer guessed
+  "different repo → probably a different LD project" and downgraded to advisory.
+- **Semantics change (`create_flag.prerequisite` → writer `addPrerequisite`):** wiring
+  now attaches the parent AND turns the child ON serving treatment behind it, per
+  environment — Beacon's release-via-prerequisites pattern at creation time. Safe while
+  the parent is off (LD serves the child's off variation to everyone); when the parent
+  releases, the child goes live in lockstep. Idempotent per environment.
+- **Planner instructions:** prerequisite recommendations must carry the EXACT parent
+  key read from the gating code (read_file fallback when search rate-limits/misses);
+  never guess, never prose, never speculate about LD project topology — advisory is
+  reserved for "repo unreadable".
+- **Implementer instructions (P01–P05 rewrite):** always pass the prerequisite when an
+  exact key is named (the tool resolves the parent in the app project and fails soft —
+  no topology guessing); verify uncertain keys yourself with `query_related_repos`
+  (newly granted: graph edge capability + tool attached to the variation);
+  `releasePlan.prerequisites` is a machine field — exact keys only, prose in notes.
+- **Guardrails in code:** `write_manifest` now rejects non-key `flagKey` values in
+  `releasePlan.prerequisites`; the GitHub client waits out rate limits
+  (Retry-After-aware, 2 retries) instead of failing the evidence-gathering.
 
 ### ✅ Cross-repo research tool + prerequisite-flag guidance (split-repo estates, ADR 0012)
 - **New tool** `query_related_repos` (attached to the research planner): queries the

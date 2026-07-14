@@ -30,7 +30,8 @@
           "create_flag",
           "edit_files",
           "write_manifest",
-          "read_docs"
+          "read_docs",
+          "query_repos"
         ]
       }
     },

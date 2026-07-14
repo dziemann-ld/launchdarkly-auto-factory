@@ -110,7 +110,7 @@ const CREATE_FLAG_TOOL: AnthropicToolDef = {
       prerequisite: {
         type: "object",
         description:
-          "OPTIONAL flag dependency: attach a LaunchDarkly prerequisite so this flag can only serve treatment while the parent flag serves the given variation ('on' = true, default). Use ONLY when the research brief's prerequisite recommendation names a parent flag in the SAME LaunchDarkly project (cross-repo rollout coordination). Applied to every environment; the flag itself stays targeting-off. If the parent can't be found, flag creation still succeeds and the failure is reported back to you — surface it in your brief.",
+          "OPTIONAL flag dependency (cross-repo release coordination). In every environment this attaches the parent as a LaunchDarkly prerequisite AND turns this flag ON serving treatment behind it. SAFE while the parent is off: LaunchDarkly serves this flag's OFF variation (control) to everyone until the parent serves the required variation — nothing changes at wire time; when the parent releases, this feature goes live in lockstep. Pass it whenever the research brief names an exact parent flag key: the parent is looked up in the SAME LaunchDarkly project you create flags in (a different REPO does not mean a different project — estates commonly share one app project). If the parent isn't found, flag creation still succeeds and the failure is reported back to you — record it in the manifest and your brief.",
         properties: {
           flagKey: { type: "string", description: "The parent flag key this flag depends on." },
           variation: { type: "string", enum: ["on", "off"], description: "Parent variation required (default 'on')." },
@@ -923,6 +923,33 @@ export class SandboxToolExecutor {
     const planOf = (o: Record<string, unknown>): Record<string, unknown> =>
       ((o.releasePlan ?? o.releaseOverrides) as Record<string, unknown> | undefined) ?? {};
     const mergedPlan = { ...planOf(existing), ...planOf(inc) };
+
+    // releasePlan.prerequisites is a MACHINE field: [{flagKey, variation?}] with
+    // real flag keys only. Live run PR #11 stuffed advisory prose into flagKey,
+    // which would poison anything that later consumes the manifest — reject it
+    // and steer the prose to releasePlan.notes.
+    if (mergedPlan.prerequisites !== undefined) {
+      const prereqs = mergedPlan.prerequisites;
+      const valid =
+        Array.isArray(prereqs) &&
+        prereqs.every(
+          (p) =>
+            p &&
+            typeof p === "object" &&
+            typeof (p as { flagKey?: unknown }).flagKey === "string" &&
+            /^[a-z0-9][a-z0-9._-]*$/i.test((p as { flagKey: string }).flagKey) &&
+            ((p as { variation?: unknown }).variation === undefined ||
+              (p as { variation?: unknown }).variation === "on" ||
+              (p as { variation?: unknown }).variation === "off"),
+        );
+      if (!valid) {
+        return {
+          content:
+            "write_manifest: releasePlan.prerequisites must be [{\"flagKey\": \"<real-flag-key>\", \"variation\": \"on\"|\"off\"}] — flagKey is a machine field (lowercase key, no prose). Put advisory context in releasePlan.notes instead; if you don't know the parent flag key, do not invent an entry.",
+          isError: true,
+        };
+      }
+    }
 
     // releaseIntent: create-if-absent for agents; steward grade may update it.
     const existingIntent = existing.releaseIntent as Record<string, unknown> | undefined;

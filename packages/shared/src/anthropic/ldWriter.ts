@@ -127,12 +127,20 @@ export class LdResourceWriter {
   }
 
   /**
-   * Attach a prerequisite (parent flag at the required variation) to a flag in
-   * EVERY environment — cross-repo rollout coordination: the child can only
-   * serve treatment while the parent serves `variation`. Safe on a dark flag
-   * (targeting off), so creation-time wiring changes nothing until release.
-   * Idempotent: environments that already carry the prerequisite are skipped.
-   * Throws only when nothing could be applied (missing parent, no variation).
+   * Wire a flag behind a parent prerequisite in EVERY environment — the
+   * release-via-prerequisites pattern Beacon uses at deploy time
+   * (beacon/src/trigger.ts), applied at creation time: attach the
+   * prerequisite, turn the child ON, and point its fallthrough at treatment.
+   *
+   * SAFE ON AN OFF PARENT BY LD SEMANTICS: while the parent serves a
+   * variation other than the required one, LaunchDarkly serves the child's
+   * OFF variation (control) to every context, even though the child is on.
+   * So wiring changes nothing for users; when the parent releases, the child
+   * goes live in lockstep with it — release coordination is structural.
+   *
+   * Idempotent: environments already wired (prerequisite present + flag on)
+   * are skipped. Throws only when nothing could be applied (missing parent,
+   * no matching variation).
    */
   async addPrerequisite(childKey: string, parentKey: string, variation: "on" | "off" = "on"): Promise<string> {
     const want = variation === "on";
@@ -148,24 +156,43 @@ export class LdResourceWriter {
     }
 
     const child = await this.ld.getFlag<{
-      environments?: Record<string, { prerequisites?: Array<{ key?: string }> }>;
+      variations?: Array<{ _id?: string; value?: unknown }>;
+      environments?: Record<string, { on?: boolean; prerequisites?: Array<{ key?: string }> }>;
     }>(childKey);
+    const treatment = (child.data.variations ?? []).find((v) => v.value === true);
+    if (!treatment?._id) {
+      throw new Error(`flag '${childKey}' has no boolean treatment (true) variation`);
+    }
     const envs = Object.entries(child.data.environments ?? {});
     if (envs.length === 0) throw new Error(`flag '${childKey}' reports no environments`);
 
     const applied: string[] = [];
     const failed: string[] = [];
     for (const [env, cfg] of envs) {
-      if ((cfg?.prerequisites ?? []).some((p) => p?.key === parentKey)) {
+      const hasPrereq = (cfg?.prerequisites ?? []).some((p) => p?.key === parentKey);
+      const isOn = cfg?.on === true;
+      if (hasPrereq && isOn) {
         applied.push(env); // already wired (PR re-run)
         continue;
+      }
+      const instructions: Array<Record<string, unknown>> = [];
+      if (!hasPrereq) {
+        instructions.push({ kind: "addPrerequisite", key: parentKey, variationId: parentVar._id });
+      }
+      if (!isOn) {
+        // Same instruction pair Beacon's prerequisite release uses: on +
+        // fallthrough=treatment. The unmet prerequisite keeps users on control.
+        instructions.push(
+          { kind: "turnFlagOn" },
+          { kind: "updateFallthroughVariationOrRollout", variationId: treatment._id },
+        );
       }
       try {
         await this.ld.patchFlagSemantic(
           childKey,
           env,
-          [{ kind: "addPrerequisite", key: parentKey, variationId: parentVar._id }],
-          `AutoFactory: prerequisite ${parentKey}=${variation} (cross-repo rollout coordination)`,
+          instructions,
+          `AutoFactory: on behind prerequisite ${parentKey}=${variation} (cross-repo release coordination)`,
         );
         applied.push(env);
       } catch (e) {
@@ -176,7 +203,10 @@ export class LdResourceWriter {
       throw new Error(`prerequisite '${parentKey}' could not be applied to any environment (${failed.join("; ")})`);
     }
     const failNote = failed.length ? ` (failed in ${failed.join("; ")})` : "";
-    return `Prerequisite '${parentKey}'=${variation} attached in ${applied.length} environment(s): ${applied.join(", ")}.${failNote}`;
+    return (
+      `Prerequisite wired in ${applied.length} environment(s) (${applied.join(", ")}): ` +
+      `'${childKey}' is ON serving treatment behind '${parentKey}'=${variation} — users get control until the parent releases, then this flag goes live with it.${failNote}`
+    );
   }
 
   /** Idempotent: turn on client-side ID availability for an existing flag. */

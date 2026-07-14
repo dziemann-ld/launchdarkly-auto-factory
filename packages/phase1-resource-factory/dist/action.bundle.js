@@ -36291,7 +36291,7 @@ var CREATE_FLAG_TOOL = {
       tags: { type: "array", items: { type: "string" }, description: "Extra tags (auto-factory tags are added automatically)" },
       prerequisite: {
         type: "object",
-        description: "OPTIONAL flag dependency: attach a LaunchDarkly prerequisite so this flag can only serve treatment while the parent flag serves the given variation ('on' = true, default). Use ONLY when the research brief's prerequisite recommendation names a parent flag in the SAME LaunchDarkly project (cross-repo rollout coordination). Applied to every environment; the flag itself stays targeting-off. If the parent can't be found, flag creation still succeeds and the failure is reported back to you \u2014 surface it in your brief.",
+        description: "OPTIONAL flag dependency (cross-repo release coordination). In every environment this attaches the parent as a LaunchDarkly prerequisite AND turns this flag ON serving treatment behind it. SAFE while the parent is off: LaunchDarkly serves this flag's OFF variation (control) to everyone until the parent serves the required variation \u2014 nothing changes at wire time; when the parent releases, this feature goes live in lockstep. Pass it whenever the research brief names an exact parent flag key: the parent is looked up in the SAME LaunchDarkly project you create flags in (a different REPO does not mean a different project \u2014 estates commonly share one app project). If the parent isn't found, flag creation still succeeds and the failure is reported back to you \u2014 record it in the manifest and your brief.",
         properties: {
           flagKey: { type: "string", description: "The parent flag key this flag depends on." },
           variation: { type: "string", enum: ["on", "off"], description: "Parent variation required (default 'on')." }
@@ -36967,6 +36967,16 @@ ${body}` };
     }
     const planOf = (o) => o.releasePlan ?? o.releaseOverrides ?? {};
     const mergedPlan = { ...planOf(existing), ...planOf(inc) };
+    if (mergedPlan.prerequisites !== void 0) {
+      const prereqs = mergedPlan.prerequisites;
+      const valid = Array.isArray(prereqs) && prereqs.every((p) => p && typeof p === "object" && typeof p.flagKey === "string" && /^[a-z0-9][a-z0-9._-]*$/i.test(p.flagKey) && (p.variation === void 0 || p.variation === "on" || p.variation === "off"));
+      if (!valid) {
+        return {
+          content: `write_manifest: releasePlan.prerequisites must be [{"flagKey": "<real-flag-key>", "variation": "on"|"off"}] \u2014 flagKey is a machine field (lowercase key, no prose). Put advisory context in releasePlan.notes instead; if you don't know the parent flag key, do not invent an entry.`,
+          isError: true
+        };
+      }
+    }
     const existingIntent = existing.releaseIntent;
     let intent;
     let intentNote;
@@ -37247,12 +37257,20 @@ var LdResourceWriter = class {
     };
   }
   /**
-   * Attach a prerequisite (parent flag at the required variation) to a flag in
-   * EVERY environment — cross-repo rollout coordination: the child can only
-   * serve treatment while the parent serves `variation`. Safe on a dark flag
-   * (targeting off), so creation-time wiring changes nothing until release.
-   * Idempotent: environments that already carry the prerequisite are skipped.
-   * Throws only when nothing could be applied (missing parent, no variation).
+   * Wire a flag behind a parent prerequisite in EVERY environment — the
+   * release-via-prerequisites pattern Beacon uses at deploy time
+   * (beacon/src/trigger.ts), applied at creation time: attach the
+   * prerequisite, turn the child ON, and point its fallthrough at treatment.
+   *
+   * SAFE ON AN OFF PARENT BY LD SEMANTICS: while the parent serves a
+   * variation other than the required one, LaunchDarkly serves the child's
+   * OFF variation (control) to every context, even though the child is on.
+   * So wiring changes nothing for users; when the parent releases, the child
+   * goes live in lockstep with it — release coordination is structural.
+   *
+   * Idempotent: environments already wired (prerequisite present + flag on)
+   * are skipped. Throws only when nothing could be applied (missing parent,
+   * no matching variation).
    */
   async addPrerequisite(childKey, parentKey, variation = "on") {
     const want = variation === "on";
@@ -37267,18 +37285,31 @@ var LdResourceWriter = class {
       throw new Error(`parent flag '${parentKey}' has no boolean '${variation}' variation`);
     }
     const child = await this.ld.getFlag(childKey);
+    const treatment = (child.data.variations ?? []).find((v) => v.value === true);
+    if (!treatment?._id) {
+      throw new Error(`flag '${childKey}' has no boolean treatment (true) variation`);
+    }
     const envs = Object.entries(child.data.environments ?? {});
     if (envs.length === 0)
       throw new Error(`flag '${childKey}' reports no environments`);
     const applied = [];
     const failed = [];
     for (const [env, cfg] of envs) {
-      if ((cfg?.prerequisites ?? []).some((p) => p?.key === parentKey)) {
+      const hasPrereq = (cfg?.prerequisites ?? []).some((p) => p?.key === parentKey);
+      const isOn = cfg?.on === true;
+      if (hasPrereq && isOn) {
         applied.push(env);
         continue;
       }
+      const instructions = [];
+      if (!hasPrereq) {
+        instructions.push({ kind: "addPrerequisite", key: parentKey, variationId: parentVar._id });
+      }
+      if (!isOn) {
+        instructions.push({ kind: "turnFlagOn" }, { kind: "updateFallthroughVariationOrRollout", variationId: treatment._id });
+      }
       try {
-        await this.ld.patchFlagSemantic(childKey, env, [{ kind: "addPrerequisite", key: parentKey, variationId: parentVar._id }], `AutoFactory: prerequisite ${parentKey}=${variation} (cross-repo rollout coordination)`);
+        await this.ld.patchFlagSemantic(childKey, env, instructions, `AutoFactory: on behind prerequisite ${parentKey}=${variation} (cross-repo release coordination)`);
         applied.push(env);
       } catch (e) {
         failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
@@ -37288,7 +37319,7 @@ var LdResourceWriter = class {
       throw new Error(`prerequisite '${parentKey}' could not be applied to any environment (${failed.join("; ")})`);
     }
     const failNote = failed.length ? ` (failed in ${failed.join("; ")})` : "";
-    return `Prerequisite '${parentKey}'=${variation} attached in ${applied.length} environment(s): ${applied.join(", ")}.${failNote}`;
+    return `Prerequisite wired in ${applied.length} environment(s) (${applied.join(", ")}): '${childKey}' is ON serving treatment behind '${parentKey}'=${variation} \u2014 users get control until the parent releases, then this flag goes live with it.${failNote}`;
   }
   /** Idempotent: turn on client-side ID availability for an existing flag. */
   async ensureClientSideAvailability(flagKey) {
@@ -37905,6 +37936,9 @@ function loadRelatedRepos(sandboxRoot) {
   }
 }
 var API_BASE = "https://api.github.com";
+var RATE_LIMIT_RETRIES2 = 2;
+var RATE_LIMIT_DEFAULT_WAIT_MS = 3e4;
+var RATE_LIMIT_MAX_WAIT_MS = 65e3;
 var MAX_SEARCH_RESULTS = 8;
 var MAX_FILE_BYTES2 = 4e4;
 var MAX_DIR_ENTRIES = 100;
@@ -37934,21 +37968,34 @@ ${lines.join("\n")}
 relationship semantics: downstream = consumes this repo's surfaces; upstream = this repo consumes theirs; sibling = peer.`;
   }
   async gh(path5, accept = "application/vnd.github+json") {
-    const res = await fetch(`${this.apiBase}${path5}`, {
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        Accept: accept,
-        "X-GitHub-Api-Version": "2022-11-28"
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(`${this.apiBase}${path5}`, {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: accept,
+          "X-GitHub-Api-Version": "2022-11-28"
+        }
+      });
+      if (res.status === 404)
+        throw new Error(`not found (404) \u2014 check the path, or the token cannot see this repo`);
+      const rateLimited = res.status === 429 || res.status === 403 && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.get("retry-after") !== null);
+      if (rateLimited && attempt < RATE_LIMIT_RETRIES2) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        const resetAt = Number(res.headers.get("x-ratelimit-reset")) * 1e3;
+        const waitMs = Math.min(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1e3 : resetAt > Date.now() ? resetAt - Date.now() + 1e3 : RATE_LIMIT_DEFAULT_WAIT_MS, RATE_LIMIT_MAX_WAIT_MS);
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
       }
-    });
-    if (res.status === 404)
-      throw new Error(`not found (404) \u2014 check the path, or the token cannot see this repo`);
-    if (res.status === 403 || res.status === 401) {
-      throw new Error(`GitHub API ${res.status} \u2014 the run's token cannot read this repo (private repos need AUTOFACTORY_REPOS_TOKEN) or rate limit hit`);
+      if (rateLimited) {
+        throw new Error(`GitHub API rate limit persisted after ${RATE_LIMIT_RETRIES2} waits \u2014 prefer read_file/list_dir (higher limits than search), or proceed with the evidence you have`);
+      }
+      if (res.status === 403 || res.status === 401) {
+        throw new Error(`GitHub API ${res.status} \u2014 the run's token cannot read this repo (private repos need AUTOFACTORY_REPOS_TOKEN)`);
+      }
+      if (!res.ok)
+        throw new Error(`GitHub API ${res.status} ${res.statusText}`);
+      return res.json();
     }
-    if (!res.ok)
-      throw new Error(`GitHub API ${res.status} ${res.statusText}`);
-    return res.json();
   }
   /**
    * Code search within one registered repo (GitHub search API — default branch
@@ -38033,7 +38080,7 @@ function modeNote(caps) {
     lines.push("You have `query_dependencies` \u2014 the estate's knowledge graph (service call edges observed from LaunchDarkly telemetry + flag\u2192code wrap points). Call it with NO arguments EARLY to get this PR's blast radius (changed services, dependent services at risk, upstream contracts, flags already on the changed code) and let it inform your classification and risk_score. Treat any entry in its `gaps` list as UNKNOWN coverage \u2014 a thin graph is never evidence of low impact.");
   }
   if (caps.queryRepos) {
-    lines.push("You have `query_related_repos` \u2014 the estate's OTHER repositories, registered by this repo (relatedRepos in .autofactory/services.yaml). Call op='list' EARLY, then SEARCH the relevant repos for the concrete surfaces this PR touches (endpoint paths, event names, shared types, flag keys) to establish upstream/downstream impact across the split estate. Report findings in a `cross_repo_impact` section of your research output \u2014 per repo: relationship, what is affected, and repo+path evidence \u2014 and, when a cross-repo dependency means this feature must not go live before a related repo's flag, name that flag in a `prerequisite_flag_recommendation` for the Flag Implementer (parent flag key + why; only flags in the SAME LaunchDarkly project can be wired as prerequisites \u2014 otherwise call it out as advisory). Fold cross-repo exposure into risk_score. No search hits is weak evidence, never proof of no impact.");
+    lines.push("You have `query_related_repos` \u2014 the estate's OTHER repositories, registered by this repo (relatedRepos in .autofactory/services.yaml). Call op='list' EARLY, then establish upstream/downstream impact of the concrete surfaces this PR touches (endpoint paths, event names, shared types, flag keys). EVIDENCE PROTOCOL: op='search' first; when search rate-limits or returns nothing, NAVIGATE instead \u2014 op='list_dir' the repo, op='read_file' the module serving the consumed surface; flag gates read like isEnabled(\"<flag-key>\") with the key declared as a constant near the top of the gated module. A flag key you report MUST be the exact string from the code \u2014 never a guess, never prose. If your output contract includes cross_repo_impact / prerequisite_flag_recommendation sections, ground them in this evidence (repo+path); if you are CONSUMING a brief's cross-repo claim (e.g. a parent flag key), verify it here before acting on it or downgrading it. No search hits is weak evidence, never proof of no impact.");
   }
   if (caps.readDocs) {
     lines.push("You have `read_ld_docs` \u2014 LaunchDarkly documentation pages as markdown. Consult it when UNCERTAIN about LaunchDarkly semantics or SDK syntax (never guess `track()`/evaluation syntax for a language the repo doesn't demonstrate); your instructions list the relevant pages, and 'llms.txt' is the full directory. Budget your fetches; a failed fetch must never block the task \u2014 fall back to the repo's existing patterns.");
