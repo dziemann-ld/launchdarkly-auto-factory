@@ -29,6 +29,13 @@ export interface FetchSpansOptions {
   maxSpans?: number;
   /** Injectable clock for tests. */
   now?: () => Date;
+  /**
+   * Backoff before each retry after a failed attempt (default [500, 1500] —
+   * 3 attempts total). The hosted o11y gateway occasionally rejects a valid
+   * token with a transient 401; one blip must not cost a run its service
+   * edges. Pass [] to disable retries (tests).
+   */
+  retryDelaysMs?: number[];
 }
 
 export interface FetchSpansResult {
@@ -115,63 +122,83 @@ async function mcpPost(
 export async function fetchRecentSpans(opts: FetchSpansOptions): Promise<FetchSpansResult> {
   const url = opts.url ?? process.env.LD_O11Y_MCP_URL ?? DEFAULT_O11Y_MCP_URL;
   const windowHours = Math.min(opts.windowHours ?? 24, 24);
+  const retryDelaysMs = opts.retryDelaysMs ?? [500, 1500];
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, retryDelaysMs[attempt - 1]));
+    try {
+      const spans = await fetchSpansOnce(url, opts, windowHours);
+      if (spans.length === 0) {
+        return {
+          spans,
+          warning:
+            `no observability spans found for project '${opts.projectKey}' in the last ${windowHours}h — ` +
+            `service-dependency edges unavailable. Instrument the services with the LaunchDarkly observability ` +
+            `SDKs (and keep some traffic flowing) to light this up.`,
+        };
+      }
+      return { spans };
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  const attempts = retryDelaysMs.length + 1;
+  return {
+    spans: [],
+    warning:
+      `observability trace query failed after ${attempts} attempt${attempts === 1 ? "" : "s"} ` +
+      `(${lastError instanceof Error ? lastError.message : String(lastError)}) — proceeding without service-dependency edges.`,
+  };
+}
+
+/** One initialize + query-traces round trip. Throws on any failure. */
+async function fetchSpansOnce(
+  url: string,
+  opts: FetchSpansOptions,
+  windowHours: number,
+): Promise<SpanRecord[]> {
   const maxSpans = opts.maxSpans ?? 200;
   const nowMs = (opts.now ?? (() => new Date()))().getTime();
   const startDate = new Date(nowMs - windowHours * 3_600_000).toISOString();
 
-  try {
-    const init = await mcpPost(url, opts.apiKey, undefined, {
+  const init = await mcpPost(url, opts.apiKey, undefined, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "auto-factory-knowledge-graph", version: "1" },
+    },
+  });
+  const sessionId = init.sessionId;
+
+  const spans: SpanRecord[] = [];
+  let id = 2;
+  let hasNext = true;
+  while (hasNext && spans.length < maxSpans) {
+    const call = await mcpPost(url, opts.apiKey, sessionId, {
       jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
+      id: id++,
+      method: "tools/call",
       params: {
-        protocolVersion: "2025-03-26",
-        capabilities: {},
-        clientInfo: { name: "auto-factory-knowledge-graph", version: "1" },
+        name: "query-traces",
+        arguments: { projectKey: opts.projectKey, startDate, limit: 50 },
       },
     });
-    const sessionId = init.sessionId;
-
-    const spans: SpanRecord[] = [];
-    let id = 2;
-    let hasNext = true;
-    while (hasNext && spans.length < maxSpans) {
-      const call = await mcpPost(url, opts.apiKey, sessionId, {
-        jsonrpc: "2.0",
-        id: id++,
-        method: "tools/call",
-        params: {
-          name: "query-traces",
-          arguments: { projectKey: opts.projectKey, startDate, limit: 50 },
-        },
-      });
-      if (call.json.error) throw new Error(call.json.error.message ?? "o11y MCP tool error");
-      const embedded = embeddedToolError(call.json);
-      if (embedded) throw new Error(embedded.slice(0, 200));
-      const traces = call.json.result?.structuredContent?.traces;
-      const nodes = (traces?.edges ?? []).map((e) => e.node).filter((n): n is RawTraceNode => !!n);
-      spans.push(...nodes.map(toSpanRecord));
-      hasNext = traces?.pageInfo?.hasNextPage === true && nodes.length > 0;
-      // The traces tool pages by cursor we don't thread yet; one page of the
-      // most recent spans is enough signal for service edges. Stop after one
-      // page unless nothing came back at all.
-      if (nodes.length > 0) break;
-    }
-
-    if (spans.length === 0) {
-      return {
-        spans,
-        warning:
-          `no observability spans found for project '${opts.projectKey}' in the last ${windowHours}h — ` +
-          `service-dependency edges unavailable. Instrument the services with the LaunchDarkly observability ` +
-          `SDKs (and keep some traffic flowing) to light this up.`,
-      };
-    }
-    return { spans };
-  } catch (e) {
-    return {
-      spans: [],
-      warning: `observability trace query failed (${e instanceof Error ? e.message : String(e)}) — proceeding without service-dependency edges.`,
-    };
+    if (call.json.error) throw new Error(call.json.error.message ?? "o11y MCP tool error");
+    const embedded = embeddedToolError(call.json);
+    if (embedded) throw new Error(embedded.slice(0, 200));
+    const traces = call.json.result?.structuredContent?.traces;
+    const nodes = (traces?.edges ?? []).map((e) => e.node).filter((n): n is RawTraceNode => !!n);
+    spans.push(...nodes.map(toSpanRecord));
+    hasNext = traces?.pageInfo?.hasNextPage === true && nodes.length > 0;
+    // The traces tool pages by cursor we don't thread yet; one page of the
+    // most recent spans is enough signal for service edges. Stop after one
+    // page unless nothing came back at all.
+    if (nodes.length > 0) break;
   }
+
+  return spans;
 }

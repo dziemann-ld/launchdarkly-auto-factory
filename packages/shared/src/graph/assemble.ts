@@ -33,7 +33,7 @@ export interface AssembleOptions {
   /** Head SHA, stamped on the artifact. */
   sha?: string;
   /** Span fetch; omit to skip the traces source (still composes, with a gap). */
-  o11y?: { apiKey: string; projectKey: string; windowHours?: number };
+  o11y?: { apiKey: string; projectKey: string; windowHours?: number; retryDelaysMs?: number[] };
   /** find-code-refs run; omit to skip the wrap-point source. */
   codeRefs?: { apiKey: string; projectKey: string; repoName?: string };
 }
@@ -166,6 +166,7 @@ export async function assembleKnowledgeGraph(opts: AssembleOptions): Promise<Ass
       apiKey: opts.o11y.apiKey,
       projectKey: opts.o11y.projectKey,
       ...(opts.o11y.windowHours !== undefined ? { windowHours: opts.o11y.windowHours } : {}),
+      ...(opts.o11y.retryDelaysMs !== undefined ? { retryDelaysMs: opts.o11y.retryDelaysMs } : {}),
     });
     spans = fetched.spans;
     if (fetched.warning) warnings.push(fetched.warning);

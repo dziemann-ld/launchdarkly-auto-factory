@@ -53,9 +53,22 @@ describe("knowledge graph: assembly", () => {
       projectKey: "nope",
       url: "http://127.0.0.1:9/unreachable",
       windowHours: 1,
+      retryDelaysMs: [],
     });
     assert.deepEqual(r.spans, []);
-    assert.match(r.warning ?? "", /trace query failed/);
+    assert.match(r.warning ?? "", /trace query failed after 1 attempt /);
+  });
+
+  it("fetchRecentSpans retries failed attempts before degrading", async () => {
+    const r = await fetchRecentSpans({
+      apiKey: "api-nope",
+      projectKey: "nope",
+      url: "http://127.0.0.1:9/unreachable",
+      windowHours: 1,
+      retryDelaysMs: [1, 1],
+    });
+    assert.deepEqual(r.spans, []);
+    assert.match(r.warning ?? "", /trace query failed after 3 attempts /);
   });
 
   describe("against a scratch git checkout", () => {
@@ -99,7 +112,7 @@ describe("knowledge graph: assembly", () => {
         const r = await assembleKnowledgeGraph({
           sandboxRoot: root,
           prBaseRef: "main",
-          o11y: { apiKey: "api-nope", projectKey: "nope", windowHours: 1 },
+          o11y: { apiKey: "api-nope", projectKey: "nope", windowHours: 1, retryDelaysMs: [] },
         });
         assert.equal(r.graph.services.length, 2);
         assert.ok(r.warnings.some((w) => w.includes("trace query failed")));
