@@ -32,6 +32,7 @@ import {
   type Runner,
   type RunnerResult,
 } from "@launchdarkly/server-sdk-ai";
+import { SpanKind, SpanStatusCode, aiTracer, setGenAiAttributes } from "./observability.js";
 
 /** One structured single-shot completion, supplied per provider. */
 export interface JudgeCompletionRequest {
@@ -57,26 +58,67 @@ export interface JudgeCompletionResult {
 
 export type JudgeCompletion = (req: JudgeCompletionRequest) => Promise<JudgeCompletionResult>;
 
+/** Span context for the judge's own LLM call (gen_ai trace, see observability.ts). */
+interface JudgeSpanMeta {
+  /** The judge config's key (span name + config attribution). */
+  judgeKey: string;
+  /** The evaluated node's config key (what this judge is scoring). */
+  judgedConfigKey: string;
+  /** Execution backend for the judge completion ("anthropic" | "cursor"). */
+  provider?: string;
+}
+
 /** Adapts a JudgeCompletion to the SDK's Runner interface for one judge config. */
 class CompletionJudgeRunner implements Runner {
   constructor(
     private readonly judgeCfg: LDAIJudgeConfig,
     private readonly completion: JudgeCompletion,
+    private readonly spanMeta: JudgeSpanMeta,
   ) {}
 
   async run(input: string, outputType?: Record<string, unknown>): Promise<RunnerResult> {
     const system = (this.judgeCfg.messages ?? []).map((m) => m.content).join("\n\n");
-    const r = await this.completion({
-      ...(this.judgeCfg.model?.name ? { model: this.judgeCfg.model.name } : {}),
-      system,
-      input,
-      schema: outputType ?? {},
-    });
-    return {
-      content: r.content,
-      ...(r.parsed ? { parsed: r.parsed } : {}),
-      metrics: { success: r.success, ...(r.tokens ? { tokens: r.tokens } : {}) },
-    };
+    // The judge's completion is an LLM call in its own right — emit a gen_ai
+    // span so judges appear in LLM Observability alongside the agents they
+    // score, correlated by the shared launchdarkly.run.id. This runner only
+    // executes when the judge sampled the run, so every span is a real call.
+    const span = aiTracer().startSpan(`judge ${this.spanMeta.judgeKey}`, { kind: SpanKind.CLIENT });
+    try {
+      const r = await this.completion({
+        ...(this.judgeCfg.model?.name ? { model: this.judgeCfg.model.name } : {}),
+        system,
+        input,
+        schema: outputType ?? {},
+      });
+      setGenAiAttributes(span, {
+        provider: this.spanMeta.provider ?? "unknown",
+        requestModel: this.judgeCfg.model?.name ?? "unknown",
+        prompt: `${system}\n\n${input}`,
+        output: r.content,
+        ...(r.tokens ? { usage: r.tokens } : {}),
+      });
+      span.setAttributes({
+        "launchdarkly.ai.config.key": this.spanMeta.judgeKey,
+        "launchdarkly.ai.judge": true,
+        "launchdarkly.ai.judge.of": this.spanMeta.judgedConfigKey,
+      });
+      if (!r.success) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: "judge completion failed" });
+      }
+      return {
+        content: r.content,
+        ...(r.parsed ? { parsed: r.parsed } : {}),
+        metrics: { success: r.success, ...(r.tokens ? { tokens: r.tokens } : {}) },
+      };
+    } catch (e) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: e instanceof Error ? e.message : String(e),
+      });
+      throw e;
+    } finally {
+      span.end();
+    }
   }
 }
 
@@ -103,6 +145,8 @@ export interface CreateJudgeHookOptions {
   variables?: Record<string, unknown>;
   /** Provider-specific structured completion that executes the judge model. */
   completion: JudgeCompletion;
+  /** Execution backend name recorded on judge gen_ai spans ("anthropic" | "cursor"). */
+  provider?: string;
   /**
    * Optional ground-truth gatherer (see judgeEvidence.ts). When set, its output
    * is appended to the judge's input as a VERIFIED EVIDENCE section — the
@@ -167,7 +211,12 @@ export function createJudgeHook(opts: CreateJudgeHookOptions): JudgeHook {
           continue;
         }
         const rate = samplingRateOf(attachment as unknown as Record<string, unknown>);
-        const judge = new Judge(judgeCfg, new CompletionJudgeRunner(judgeCfg, opts.completion), rate);
+        const runner = new CompletionJudgeRunner(judgeCfg, opts.completion, {
+          judgeKey,
+          judgedConfigKey: configKey,
+          ...(opts.provider ? { provider: opts.provider } : {}),
+        });
+        const judge = new Judge(judgeCfg, runner, rate);
         const result = await judge.evaluate(judgeInput, output);
         results.push(result);
         if (result.sampled) {

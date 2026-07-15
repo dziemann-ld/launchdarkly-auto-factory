@@ -482,6 +482,7 @@ async function main(): Promise<void> {
         ldContext,
         variables: buildVariables(context),
         completion: judgeCompletion,
+        provider,
         evidence: createGitDiffEvidence(sandboxRoot),
       })
     : undefined;

@@ -38566,23 +38566,53 @@ ${req.prompt}`;
 var CompletionJudgeRunner = class {
   judgeCfg;
   completion;
-  constructor(judgeCfg, completion) {
+  spanMeta;
+  constructor(judgeCfg, completion, spanMeta) {
     this.judgeCfg = judgeCfg;
     this.completion = completion;
+    this.spanMeta = spanMeta;
   }
   async run(input, outputType) {
     const system = (this.judgeCfg.messages ?? []).map((m) => m.content).join("\n\n");
-    const r = await this.completion({
-      ...this.judgeCfg.model?.name ? { model: this.judgeCfg.model.name } : {},
-      system,
-      input,
-      schema: outputType ?? {}
-    });
-    return {
-      content: r.content,
-      ...r.parsed ? { parsed: r.parsed } : {},
-      metrics: { success: r.success, ...r.tokens ? { tokens: r.tokens } : {} }
-    };
+    const span = aiTracer().startSpan(`judge ${this.spanMeta.judgeKey}`, { kind: SpanKind.CLIENT });
+    try {
+      const r = await this.completion({
+        ...this.judgeCfg.model?.name ? { model: this.judgeCfg.model.name } : {},
+        system,
+        input,
+        schema: outputType ?? {}
+      });
+      setGenAiAttributes(span, {
+        provider: this.spanMeta.provider ?? "unknown",
+        requestModel: this.judgeCfg.model?.name ?? "unknown",
+        prompt: `${system}
+
+${input}`,
+        output: r.content,
+        ...r.tokens ? { usage: r.tokens } : {}
+      });
+      span.setAttributes({
+        "launchdarkly.ai.config.key": this.spanMeta.judgeKey,
+        "launchdarkly.ai.judge": true,
+        "launchdarkly.ai.judge.of": this.spanMeta.judgedConfigKey
+      });
+      if (!r.success) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: "judge completion failed" });
+      }
+      return {
+        content: r.content,
+        ...r.parsed ? { parsed: r.parsed } : {},
+        metrics: { success: r.success, ...r.tokens ? { tokens: r.tokens } : {} }
+      };
+    } catch (e) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: e instanceof Error ? e.message : String(e)
+      });
+      throw e;
+    } finally {
+      span.end();
+    }
   }
 };
 function judgeKeyOf(j) {
@@ -38626,7 +38656,12 @@ ${evidence}`;
           continue;
         }
         const rate = samplingRateOf(attachment);
-        const judge = new Judge(judgeCfg, new CompletionJudgeRunner(judgeCfg, opts.completion), rate);
+        const runner = new CompletionJudgeRunner(judgeCfg, opts.completion, {
+          judgeKey,
+          judgedConfigKey: configKey,
+          ...opts.provider ? { provider: opts.provider } : {}
+        });
+        const judge = new Judge(judgeCfg, runner, rate);
         const result = await judge.evaluate(judgeInput, output);
         results.push(result);
         if (result.sampled) {
@@ -39246,6 +39281,7 @@ async function main() {
     ldContext,
     variables: buildVariables(context),
     completion: judgeCompletion,
+    provider,
     evidence: createGitDiffEvidence(sandboxRoot)
   }) : void 0;
   const judgeScores = /* @__PURE__ */ new Map();
