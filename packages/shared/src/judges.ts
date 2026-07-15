@@ -97,9 +97,10 @@ class CompletionJudgeRunner implements Runner {
         output: r.content,
         ...(r.tokens ? { usage: r.tokens } : {}),
       });
+      // NOTE: no bare `launchdarkly.ai.judge` boolean — LD nests dotted keys,
+      // so a scalar at `…ai.judge` collides with `…ai.judge.of` (verified live).
       span.setAttributes({
         "launchdarkly.ai.config.key": this.spanMeta.judgeKey,
-        "launchdarkly.ai.judge": true,
         "launchdarkly.ai.judge.of": this.spanMeta.judgedConfigKey,
       });
       if (!r.success) {

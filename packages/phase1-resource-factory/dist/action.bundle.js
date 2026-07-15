@@ -38593,7 +38593,6 @@ ${input}`,
       });
       span.setAttributes({
         "launchdarkly.ai.config.key": this.spanMeta.judgeKey,
-        "launchdarkly.ai.judge": true,
         "launchdarkly.ai.judge.of": this.spanMeta.judgedConfigKey
       });
       if (!r.success) {
