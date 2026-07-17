@@ -23,6 +23,7 @@ import { discoverNewReleaseFlags } from "./discovery.js";
 import { otherSideHasFile } from "./fullstack.js";
 import { GitHubClient } from "./github.js";
 import { monitorSettingsFromEnv, monitorTriggeredRelease } from "./monitor.js";
+import { repointDependentPrerequisites } from "./repoint.js";
 import { parseRailwayWebhook } from "./railway.js";
 import { decideScope } from "./scope.js";
 import { FileDeployStateStore, resolvePreviousSha, type DeployStateStore } from "./state.js";
@@ -31,7 +32,7 @@ import { triggerRelease } from "./trigger.js";
 interface FlagOutcome {
   flag: string;
   scope: string;
-  action: "released" | "held" | "already_running" | "skipped" | "waiting" | "error";
+  action: "released" | "held" | "noop" | "already_running" | "skipped" | "waiting" | "error";
   detail?: unknown;
 }
 
@@ -147,15 +148,21 @@ export function createApp(cfg: BeaconConfig, ld: LdClient, deps: BeaconDeps = {}
           continue;
         }
         const result = await triggerRelease(ld, flag, n.environment);
-        // Only staged rollouts get release monitoring: "held" started nothing,
-        // "prerequisites"/"immediate" have no automated release to watch.
+        // Only staged rollouts get release monitoring: "held"/"noop" started
+        // nothing, "prerequisites"/"immediate" have no automated release to watch.
         if (result.method === "progressive" || result.method === "guarded") {
           onReleaseStarted(flag.flagKey, n.environment);
+        }
+        // An immediate release moves the fallthrough right here — re-point any
+        // auto-factory children pinned on the previous variation (staged
+        // releases do this when monitoring sees them complete).
+        if (result.method === "immediate") {
+          await repointDependentPrerequisites(ld, flag.flagKey, n.environment);
         }
         outcomes.push({
           flag: flag.flagKey,
           scope,
-          action: result.method === "held" ? "held" : "released",
+          action: result.method === "held" ? "held" : result.method === "noop" ? "noop" : "released",
           detail: result,
         });
       } catch (e) {

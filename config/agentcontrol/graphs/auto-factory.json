@@ -28,6 +28,7 @@
         "request_type": "Fix",
         "capabilities": [
           "create_flag",
+          "flag_state",
           "edit_files",
           "write_manifest",
           "read_docs",
@@ -77,7 +78,7 @@
           "query_graph"
         ],
         "require_tags": {
-          "flag_created": "true"
+          "flag_ready": "true"
         }
       }
     }

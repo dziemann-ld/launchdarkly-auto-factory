@@ -102,6 +102,99 @@ describe("addPrerequisite: on-behind-parent wiring", () => {
   });
 });
 
+describe("addPrerequisite: multivariate parents and children", () => {
+  /** Multivariate parent (control/v1/v2) + multivariate child (control/v1). */
+  function fakeMultivariateLd(parentEnvs: Record<string, unknown>) {
+    const patches: Patch[] = [];
+    const ld = {
+      projectKey: "app-proj",
+      getFlag: async (flagKey: string) => {
+        if (flagKey === "parent-flag") {
+          return {
+            status: 200,
+            ok: true,
+            data: {
+              variations: [
+                { _id: "pv-control", value: "control" },
+                { _id: "pv-v1", value: "v1" },
+                { _id: "pv-v2", value: "v2" },
+              ],
+              defaults: { onVariation: 1, offVariation: 0 },
+              environments: parentEnvs,
+            },
+          };
+        }
+        return {
+          status: 200,
+          ok: true,
+          data: {
+            variations: [
+              { _id: "cv-control", value: "control" },
+              { _id: "cv-v1", value: "v1" },
+            ],
+            environments: { production: {}, test: {} },
+          },
+        };
+      },
+      patchFlagSemantic: async (flagKey: string, env: string, instructions: Array<Record<string, unknown>>) => {
+        patches.push({ flagKey, env, instructions });
+        return { status: 200, ok: true, data: {} };
+      },
+    } as unknown as LdClient;
+    return { ld, patches };
+  }
+
+  it("'on' pins what each environment's fallthrough serves (per-env resolution)", async () => {
+    const { ld, patches } = fakeMultivariateLd({
+      production: { fallthrough: { variation: 1 } }, // serves v1
+      test: { fallthrough: { variation: 2 } }, // serves v2
+    });
+    await new LdResourceWriter(ld).addPrerequisite("child-flag", "parent-flag", "on");
+    const byEnv = Object.fromEntries(patches.map((p) => [p.env, p.instructions[0]]));
+    assert.equal(byEnv.production?.variationId, "pv-v1");
+    assert.equal(byEnv.test?.variationId, "pv-v2");
+    // Child fallthrough points at its multivariate treatment (lineage tip v1).
+    assert.equal(patches[0]?.instructions[2]?.variationId, "cv-v1");
+  });
+
+  it("an explicit parent variation value ('v2') pins exactly that in every env", async () => {
+    const { ld, patches } = fakeMultivariateLd({
+      production: { fallthrough: { variation: 1 } },
+      test: { fallthrough: { variation: 1 } },
+    });
+    await new LdResourceWriter(ld).addPrerequisite("child-flag", "parent-flag", "v2");
+    for (const p of patches) assert.equal(p.instructions[0]?.variationId, "pv-v2");
+  });
+
+  it("'on' falls back to the heaviest rollout arm, then the default on-variation", async () => {
+    const { ld, patches } = fakeMultivariateLd({
+      production: { fallthrough: { rollout: { variations: [{ variation: 1, weight: 30000 }, { variation: 2, weight: 70000 }] } } },
+      test: {}, // no fallthrough at all → defaults.onVariation (v1)
+    });
+    await new LdResourceWriter(ld).addPrerequisite("child-flag", "parent-flag", "on");
+    const byEnv = Object.fromEntries(patches.map((p) => [p.env, p.instructions[0]]));
+    assert.equal(byEnv.production?.variationId, "pv-v2");
+    assert.equal(byEnv.test?.variationId, "pv-v1");
+  });
+
+  it("an explicit childVariation selects which child variation goes live behind the parent", async () => {
+    const { ld, patches } = fakeMultivariateLd({
+      production: { fallthrough: { variation: 1 } },
+      test: { fallthrough: { variation: 1 } },
+    });
+    await new LdResourceWriter(ld).addPrerequisite("child-flag", "parent-flag", "on", "control");
+    for (const p of patches) assert.equal(p.instructions[2]?.variationId, "cv-control");
+  });
+
+  it("throws when a multivariate parent lacks the requested explicit variation", async () => {
+    const { ld } = fakeMultivariateLd({ production: { fallthrough: { variation: 1 } } });
+    await assert.rejects(
+      () => new LdResourceWriter(ld).addPrerequisite("child-flag", "parent-flag", "v9"),
+      /could not be applied/,
+    );
+  });
+});
+
 describe("write_manifest: releasePlan.prerequisites is a machine field", () => {
   const root = mkdtempSync(join(tmpdir(), "af-manifest-prereq-"));
   after(() => rmSync(root, { recursive: true, force: true }));

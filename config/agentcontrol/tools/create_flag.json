@@ -1,7 +1,7 @@
 {
   "key": "create_flag",
   "name": "create_flag",
-  "description": "Create a boolean feature flag in LaunchDarkly (the app/data-plane project). Treatment=true (new behavior), Control=false (existing behavior, served when off). Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_created/flag_key tags are set for you.",
+  "description": "Create a STRING MULTIVARIATE feature flag in LaunchDarkly (the app/data-plane project) with two variations: 'control' (existing behavior — the off-variation, served while the flag is off) and 'v1' (this PR's new behavior). AutoFactory never creates boolean flags: multivariate flags can take iteration variations (v2, v3, …) on follow-up PRs, booleans never can. Wire code by comparing the STRING variation value with a fail-safe default of 'control', e.g. variation(key, ctx, 'control') === 'v1'. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you.",
   "schema": {
     "type": "object",
     "properties": {
@@ -16,6 +16,10 @@
       "description": {
         "type": "string",
         "description": "What the flag gates"
+      },
+      "treatment_description": {
+        "type": "string",
+        "description": "One line on what the v1 treatment does — stored as the v1 variation's description (variation VALUES stay control/v1/v2…; semantics go here)."
       },
       "scope": {
         "type": "string",
@@ -35,7 +39,7 @@
       },
       "prerequisite": {
         "type": "object",
-        "description": "OPTIONAL flag dependency (cross-repo release coordination). In every environment this attaches the parent as a LaunchDarkly prerequisite AND turns this flag ON serving treatment behind it. SAFE while the parent is off: LaunchDarkly serves this flag's OFF variation (control) to everyone until the parent serves the required variation — nothing changes at wire time; when the parent releases, this feature goes live in lockstep. Pass it whenever the research brief names an exact parent flag key: the parent is looked up in the SAME LaunchDarkly project you create flags in (a different REPO does not mean a different project — estates commonly share one app project). If the parent isn't found, flag creation still succeeds and the failure is reported back to you — record it in the manifest and your brief.",
+        "description": "OPTIONAL flag dependency (cross-repo release coordination, and the iteration path for LEGACY BOOLEAN parents). In every environment this attaches the parent as a LaunchDarkly prerequisite AND turns this flag ON serving treatment behind it. SAFE while the parent is off: LaunchDarkly serves this flag's OFF variation (control) to everyone until the parent serves the required variation — nothing changes at wire time; when the parent releases, this feature goes live in lockstep. Pass it whenever the research brief names an exact parent flag key: the parent is looked up in the SAME LaunchDarkly project you create flags in (a different REPO does not mean a different project — estates commonly share one app project). If the parent isn't found, flag creation still succeeds and the failure is reported back to you — record it in the manifest and your brief.",
         "properties": {
           "flagKey": {
             "type": "string",
@@ -43,11 +47,7 @@
           },
           "variation": {
             "type": "string",
-            "enum": [
-              "on",
-              "off"
-            ],
-            "description": "Parent variation required (default 'on')."
+            "description": "Parent variation required: 'on'/'off' (boolean parents; for multivariate parents 'on' resolves per environment to what the parent's targeting serves when live), or an explicit variation value like 'v2' to pin exactly that. Default 'on'."
           }
         },
         "required": [

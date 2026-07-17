@@ -1,0 +1,29 @@
+{
+  "key": "add_variation",
+  "name": "add_variation",
+  "description": "Append the next iteration variation (v2, v3, …) to an EXISTING multivariate flag in LaunchDarkly — the flag_action=extend_variation path: the flag's current treatment is already released, so this PR's changes go in a NEW variation that stays dark until it is released (deploy stays decoupled from release; a guarded release will later compare vN against vN-1). Adding a variation serves nothing by itself — always safe on a live flag. Wire the new code path under the new value (e.g. === 'v2'), keeping the prior variation's path intact. ALWAYS pass the target value from the research brief / release manifest so PR re-runs are idempotent (omitting it mints the next number). FAILS on legacy boolean flags (LaunchDarkly fixes a flag's kind at creation) — iterate those via a child flag with the boolean as prerequisite instead. After it succeeds, the flag_ready/flag_key/flag_variation tags are set for you.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "key": {
+        "type": "string",
+        "description": "Existing multivariate flag key"
+      },
+      "value": {
+        "type": "string",
+        "description": "Target variation value from the brief/manifest, e.g. 'v2'. Strongly recommended (idempotent re-runs)."
+      },
+      "name": {
+        "type": "string",
+        "description": "Human-readable variation name (defaults to the value)"
+      },
+      "description": {
+        "type": "string",
+        "description": "One line on what this iteration changes vs the previous variation"
+      }
+    },
+    "required": [
+      "key"
+    ]
+  }
+}

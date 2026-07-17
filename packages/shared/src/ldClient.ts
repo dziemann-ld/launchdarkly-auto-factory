@@ -99,6 +99,26 @@ export class LdClient {
     });
   }
 
+  /**
+   * JSON-Patch a flag (project-level fields — e.g. adding a variation to a
+   * multivariate flag). Distinct from the semantic-patch methods below: the
+   * flag PATCH endpoint treats a plain JSON body as RFC 6902 operations.
+   */
+  patchFlagJson<T = unknown>(flagKey: string, operations: unknown[], comment?: string): Promise<LdResponse<T>> {
+    return this.request<T>({
+      method: "PATCH",
+      path: `/api/v2/flags/${this.conn.projectKey}/${flagKey}`,
+      body: comment ? { comment, patch: operations } : operations,
+    });
+  }
+
+  /** Flags that list this flag as a prerequisite (project-wide). */
+  getDependentFlags<T = unknown>(flagKey: string): Promise<LdResponse<T>> {
+    return this.request<T>({
+      path: `/api/v2/flags/${this.conn.projectKey}/${flagKey}/dependent-flags`,
+    });
+  }
+
   // --- AI configs & agent graphs (beta) -----------------------------------
   // The AI-config / agent-graph endpoints require the beta API version.
 

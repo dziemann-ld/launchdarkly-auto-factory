@@ -1,0 +1,21 @@
+{
+  "key": "use_existing_flag",
+  "name": "use_existing_flag",
+  "description": "Verify that an EXISTING flag variation covers this PR without any LaunchDarkly change — the flag_action=ride_existing path: the flagged behavior has NOT been released yet, so this PR simply amends the code under the current treatment variation. The tool checks LaunchDarkly directly: the flag and variation must exist and the variation must NOT be serving real traffic (and no automated release in progress) — if it IS released, the call fails and you must iterate instead (add_variation, or a child flag for boolean parents). Only a successful call sets the flag_ready/flag_key/flag_variation tags that let the chain advance — this is the honest, verified alternative to creating something unnecessary. Call it AFTER your code changes are wired (or when no code change is needed), never to skip work.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "key": {
+        "type": "string",
+        "description": "Existing flag key that gates this PR's code"
+      },
+      "variation": {
+        "type": "string",
+        "description": "Variation the PR's code path lives under (e.g. 'v1', or 'true' for a legacy boolean). Defaults to the flag's latest vN / boolean treatment."
+      }
+    },
+    "required": [
+      "key"
+    ]
+  }
+}

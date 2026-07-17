@@ -8,8 +8,41 @@
  * error.
  */
 
+import { findActiveRelease } from "../releaseAdapter.js";
 import type { LdClient } from "../ldClient.js";
 import type { Scope } from "../types.js";
+
+/**
+ * AutoFactory variation convention (multivariate-only, decided 2026-07-17):
+ * every flag is a STRING multivariate flag whose variation VALUES are the fixed
+ * lineage `control`, `v1`, `v2`, … — deterministic for agents; semantics live
+ * in the variation name/description. `control` is always the off-variation
+ * (existing behavior); the latest `vN` is the current treatment. Iterations on
+ * released behavior append the next `vN` instead of mutating a served one —
+ * that is what keeps deploy decoupled from release across follow-up PRs.
+ */
+export const CONTROL_VARIATION = "control";
+const VN_RE = /^v(\d+)$/;
+
+/** Next value in the vN lineage given the existing variation values. */
+export function nextVariationValue(values: unknown[]): string {
+  let max = 0;
+  for (const v of values) {
+    const m = typeof v === "string" ? VN_RE.exec(v) : null;
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `v${max + 1}`;
+}
+
+/** Highest vN value present (the current treatment lineage tip), if any. */
+export function latestVariationValue(values: unknown[]): string | undefined {
+  let max = 0;
+  for (const v of values) {
+    const m = typeof v === "string" ? VN_RE.exec(v) : null;
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max > 0 ? `v${max}` : undefined;
+}
 
 export interface CreateFlagArgs {
   /** Flag key (e.g. "enable-farewell"). */
@@ -17,6 +50,8 @@ export interface CreateFlagArgs {
   /** Human-readable name. Defaults to the key. */
   name?: string;
   description?: string;
+  /** What the v1 treatment does — becomes the v1 variation's description. */
+  treatmentDescription?: string;
   /** Extra tags, merged with the standard auto-factory tags. */
   tags?: string[];
   /**
@@ -76,8 +111,163 @@ export interface LdWriteResult {
   detail: string;
 }
 
+/** One environment's targeting picture in a `FlagState`. */
+export interface FlagEnvState {
+  on: boolean;
+  /** Variation values fallthrough serves (single, or rollout arms with weight > 0). */
+  fallthroughServes: string[];
+  offVariation?: string;
+  prerequisites: Array<{ flagKey: string }>;
+  /** Variation values any targeting rule serves (>0% arms included). */
+  rulesServe: string[];
+  /** Individual user/context targets exist (QA pinning — NOT counted as released). */
+  individualTargets: boolean;
+  /** In-progress automated release, or "unknown" when the read failed. */
+  activeRelease?: { status: string; kind?: string } | "unknown";
+  /** Variation values serving real traffic in this env (on + fallthrough/rules). */
+  released: string[];
+}
+
+/** Result of `LdResourceWriter.getFlagState` — the flag_action evidence. */
+export interface FlagState {
+  exists: boolean;
+  key: string;
+  kind: "boolean" | "multivariate";
+  variations: Array<{ value: string; name?: string; description?: string }>;
+  /** Tip of the vN lineage (multivariate flags), e.g. "v2". */
+  latestVariation?: string;
+  temporary?: boolean;
+  tags?: string[];
+  environments: Record<string, FlagEnvState>;
+}
+
+/** Raw REST flag shape (the fields getFlagState reads). */
+interface RawFlag {
+  variations?: Array<{ value?: unknown; name?: string; description?: string }>;
+  temporary?: boolean;
+  tags?: string[];
+  environments?: Record<
+    string,
+    {
+      on?: boolean;
+      offVariation?: number;
+      fallthrough?: { variation?: number; rollout?: { variations?: Array<{ variation?: number; weight?: number }> } };
+      rules?: Array<{ variation?: number; rollout?: { variations?: Array<{ variation?: number; weight?: number }> } }>;
+      prerequisites?: Array<{ key?: string }>;
+      targets?: unknown[];
+      contextTargets?: unknown[];
+    }
+  >;
+}
+
+/** Stable string form of a variation value (boolean true → "true"). */
+function valueString(v: unknown): string {
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
+
+/**
+ * The deterministic released-ness rule (design 2026-07-17): a variation is
+ * RELEASED when, in the environment of record (`production` when the flag has
+ * one, else conservatively ANY environment), the flag is on and fallthrough or
+ * a rule serves it to real traffic — or an automated release is in progress
+ * (mid-release counts as released; the next iteration must be a new variation).
+ * Individual QA targets do NOT count. Drives ride_existing vs extend_variation.
+ */
+export function variationReleased(
+  state: FlagState,
+  variationValue: string,
+): { released: boolean; envs: string[]; reason: string } {
+  if (!state.exists) return { released: false, envs: [], reason: `flag '${state.key}' does not exist` };
+  const envKeys = state.environments["production"] ? ["production"] : Object.keys(state.environments);
+  const envs: string[] = [];
+  const reasons: string[] = [];
+  for (const envKey of envKeys) {
+    const env = state.environments[envKey];
+    if (!env) continue;
+    if (env.released.includes(variationValue)) {
+      envs.push(envKey);
+      reasons.push(`serving in '${envKey}'`);
+    } else if (env.activeRelease && env.activeRelease !== "unknown" && env.activeRelease.status === "in_progress") {
+      envs.push(envKey);
+      reasons.push(`automated release in progress in '${envKey}'`);
+    }
+  }
+  return {
+    released: envs.length > 0,
+    envs,
+    reason: envs.length
+      ? reasons.join("; ")
+      : `'${variationValue}' serves no real traffic in ${envKeys.map((e) => `'${e}'`).join(", ")} and no release is in progress`,
+  };
+}
+
 function dedupe(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
+}
+
+/** Raw REST flag shape used by the prerequisite wiring (variations + env targeting). */
+interface PrereqFlag {
+  variations?: Array<{ _id?: string; value?: unknown }>;
+  defaults?: { onVariation?: number; offVariation?: number };
+  environments?: Record<
+    string,
+    {
+      on?: boolean;
+      offVariation?: number;
+      fallthrough?: { variation?: number; rollout?: { variations?: Array<{ variation?: number; weight?: number }> } };
+      prerequisites?: Array<{ key?: string }>;
+    }
+  >;
+}
+
+/**
+ * Which parent variation a prerequisite should pin in `env`.
+ * Boolean parents: "on" → true, "off" → false (same id in every env).
+ * Multivariate parents: an explicit value ("v2") wins; "on" resolves to what
+ * that environment's fallthrough points at (single variation, else the
+ * heaviest rollout arm, else the flag's default on-variation) — i.e. the
+ * variation the parent serves, or will serve, when live in that environment;
+ * "off" resolves to the environment's off-variation.
+ */
+function resolveParentVariationId(parent: PrereqFlag, parentKey: string, env: string, variation: string): string {
+  const vars = parent.variations ?? [];
+  const isBoolean = vars.some((v) => typeof v.value === "boolean");
+
+  if (isBoolean) {
+    if (variation !== "on" && variation !== "off") {
+      throw new Error(`parent flag '${parentKey}' is boolean — prerequisite variation must be 'on' or 'off', got '${variation}'`);
+    }
+    const want = variation === "on";
+    const match = vars.find((v) => v.value === want);
+    if (!match?._id) throw new Error(`parent flag '${parentKey}' has no boolean '${variation}' variation`);
+    return match._id;
+  }
+
+  const byIndex = (idx: number | undefined): string | undefined =>
+    idx === undefined ? undefined : vars[idx]?._id;
+
+  if (variation !== "on" && variation !== "off") {
+    const match = vars.find((v) => v.value === variation);
+    if (!match?._id) throw new Error(`parent flag '${parentKey}' has no variation with value '${variation}'`);
+    return match._id;
+  }
+
+  const cfg = parent.environments?.[env];
+  if (variation === "off") {
+    const id = byIndex(cfg?.offVariation) ?? byIndex(parent.defaults?.offVariation);
+    if (!id) throw new Error(`parent flag '${parentKey}' has no resolvable off-variation in '${env}'`);
+    return id;
+  }
+  // "on": the environment's fallthrough target — single variation, else the
+  // heaviest rollout arm, else the project default on-variation.
+  let id = byIndex(cfg?.fallthrough?.variation);
+  if (!id) {
+    const arms = [...(cfg?.fallthrough?.rollout?.variations ?? [])].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+    id = byIndex(arms[0]?.variation);
+  }
+  if (!id) id = byIndex(parent.defaults?.onVariation);
+  if (!id) throw new Error(`parent flag '${parentKey}' has no resolvable serving variation in '${env}'`);
+  return id;
 }
 
 export class LdResourceWriter {
@@ -88,10 +278,13 @@ export class LdResourceWriter {
   }
 
   /**
-   * Create a boolean feature flag (treatment=true / control=false) following the
-   * AutoFactory convention: temporary, off-variation = control (safe default).
+   * Create a STRING MULTIVARIATE feature flag following the AutoFactory
+   * convention: temporary, variations `control` (off-variation, existing
+   * behavior) + `v1` (treatment), created dark. Multivariate from day one is
+   * deliberate — LaunchDarkly fixes a flag's kind at creation, so only flags
+   * born multivariate can take `v2`, `v3`, … iteration variations later.
    */
-  async createBooleanFlag(args: CreateFlagArgs): Promise<LdWriteResult> {
+  async createFlag(args: CreateFlagArgs): Promise<LdWriteResult & { variation: string }> {
     if (!args.key) throw new Error("flag key is required");
     const clientSide = scopeNeedsClientSide(args.scope);
     const body = {
@@ -101,11 +294,19 @@ export class LdResourceWriter {
       temporary: true,
       tags: dedupe(["auto-factory", "auto-generated", ...(args.tags ?? [])]),
       variations: [
-        { value: true, name: "Treatment" },
-        { value: false, name: "Control" },
+        {
+          value: CONTROL_VARIATION,
+          name: "Control",
+          description: "Existing behavior — served while the flag is off (safe default).",
+        },
+        {
+          value: "v1",
+          name: "v1",
+          description: args.treatmentDescription || "New behavior introduced by this PR.",
+        },
       ],
-      // On = treatment (index 0); Off = control (index 1) — flag-off preserves existing behavior.
-      defaults: { onVariation: 0, offVariation: 1 },
+      // On = v1 (index 1); Off = control (index 0) — flag-off preserves existing behavior.
+      defaults: { onVariation: 1, offVariation: 0 },
       ...(clientSide
         ? { clientSideAvailability: { usingEnvironmentId: true, usingMobileKey: false } }
         : {}),
@@ -120,9 +321,166 @@ export class LdResourceWriter {
       created: !alreadyExists,
       alreadyExists,
       key: args.key,
+      variation: "v1",
       detail: alreadyExists
         ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).${clientSideNote}`
-        : `Created flag '${args.key}' in project '${this.ld.projectKey}'.${clientSideNote}`,
+        : `Created multivariate flag '${args.key}' (control + v1, dark) in project '${this.ld.projectKey}'.${clientSideNote}`,
+    };
+  }
+
+  /**
+   * Append the next variation in the vN lineage to an existing MULTIVARIATE
+   * flag — the iteration path for follow-up PRs whose flagged behavior is
+   * already released. Adding a variation serves nothing until targeting points
+   * at it, so this is always safe on a live flag.
+   *
+   * Idempotent per intended value: pass the `value` the research brief chose
+   * (e.g. "v2") and a PR re-run reuses it instead of minting "v3".
+   * Throws on legacy boolean flags — LaunchDarkly cannot add variations to
+   * them; iteration there goes through a child flag instead.
+   */
+  async addVariation(
+    flagKey: string,
+    opts: { value?: string; name?: string; description?: string } = {},
+  ): Promise<LdWriteResult & { variation: string }> {
+    if (!flagKey) throw new Error("flag key is required");
+    let flag: { data: { variations?: Array<{ value?: unknown }> } };
+    try {
+      flag = await this.ld.getFlag(flagKey);
+    } catch {
+      throw new Error(`flag '${flagKey}' not found in project '${this.ld.projectKey}'`);
+    }
+    const values = (flag.data.variations ?? []).map((v) => v.value);
+    if (values.some((v) => typeof v === "boolean")) {
+      throw new Error(
+        `'${flagKey}' is a legacy BOOLEAN flag — LaunchDarkly cannot add variations to it. ` +
+          `Iterate via a child flag with '${flagKey}' as its prerequisite instead.`,
+      );
+    }
+    const value = opts.value?.trim() || nextVariationValue(values);
+    if (!VN_RE.test(value)) {
+      throw new Error(
+        `variation value must follow the vN lineage (v2, v3, …), got '${value}' — semantics belong in the name/description`,
+      );
+    }
+    if (values.includes(value)) {
+      return {
+        created: false,
+        alreadyExists: true,
+        key: flagKey,
+        variation: value,
+        detail: `Variation '${value}' already exists on '${flagKey}' (no change — safe re-run).`,
+      };
+    }
+    await this.ld.patchFlagJson(
+      flagKey,
+      [
+        {
+          op: "add",
+          path: "/variations/-",
+          value: {
+            value,
+            name: opts.name || value,
+            ...(opts.description ? { description: opts.description } : {}),
+          },
+        },
+      ],
+      `AutoFactory: add iteration variation ${value}`,
+    );
+    return {
+      created: true,
+      alreadyExists: false,
+      key: flagKey,
+      variation: value,
+      detail:
+        `Added variation '${value}' to '${flagKey}' in project '${this.ld.projectKey}'. ` +
+        `Nothing is served from it yet — it goes live when a release points targeting at it.`,
+    };
+  }
+
+  /**
+   * Read a flag's full state — existence, kind, variation lineage, and the
+   * per-environment TARGETING picture (on/off, what fallthrough and rules
+   * serve, prerequisites, active automated releases). This is the research
+   * planner's evidence for the flag_action decision: whether a flag exists is
+   * not enough — whether its treatment is RELEASED decides ride-vs-iterate.
+   */
+  async getFlagState(flagKey: string): Promise<FlagState> {
+    if (!flagKey) throw new Error("flag key is required");
+    let res: { data: RawFlag };
+    try {
+      res = await this.ld.getFlag<RawFlag>(flagKey);
+    } catch {
+      return { exists: false, key: flagKey, kind: "multivariate", variations: [], environments: {} };
+    }
+    const raw = res.data;
+    const variations = (raw.variations ?? []).map((v) => ({
+      value: valueString(v.value),
+      ...(v.name ? { name: v.name } : {}),
+      ...(v.description ? { description: v.description } : {}),
+    }));
+    const values = (raw.variations ?? []).map((v) => v.value);
+    const kind: FlagState["kind"] = values.some((v) => typeof v === "boolean") ? "boolean" : "multivariate";
+    const latest = latestVariationValue(values);
+
+    const environments: Record<string, FlagEnvState> = {};
+    for (const [envKey, cfg] of Object.entries(raw.environments ?? {})) {
+      const at = (idx: number | undefined): string | undefined =>
+        idx === undefined ? undefined : variations[idx]?.value;
+      const served = new Set<string>();
+      const fallthroughServes: string[] = [];
+      const single = at(cfg?.fallthrough?.variation);
+      if (single !== undefined) fallthroughServes.push(single);
+      for (const arm of cfg?.fallthrough?.rollout?.variations ?? []) {
+        const v = at(arm.variation);
+        if (v !== undefined && (arm.weight ?? 0) > 0) fallthroughServes.push(v);
+      }
+      const rulesServe: string[] = [];
+      for (const rule of cfg?.rules ?? []) {
+        const rv = at(rule.variation);
+        if (rv !== undefined) rulesServe.push(rv);
+        for (const arm of rule.rollout?.variations ?? []) {
+          const v = at(arm.variation);
+          if (v !== undefined && (arm.weight ?? 0) > 0) rulesServe.push(v);
+        }
+      }
+      if (cfg?.on === true) {
+        for (const v of [...fallthroughServes, ...rulesServe]) served.add(v);
+      }
+
+      // Active automated release: only possible on an on flag (LD refuses to
+      // start one otherwise). Internal/beta read — degrade to "unknown", never throw.
+      let activeRelease: FlagEnvState["activeRelease"];
+      if (cfg?.on === true) {
+        try {
+          const rel = await findActiveRelease(this.ld, flagKey, envKey);
+          if (rel) activeRelease = { status: rel.status, kind: rel.kind };
+        } catch {
+          activeRelease = "unknown";
+        }
+      }
+
+      environments[envKey] = {
+        on: cfg?.on === true,
+        fallthroughServes,
+        ...(at(cfg?.offVariation) !== undefined ? { offVariation: at(cfg?.offVariation) as string } : {}),
+        prerequisites: (cfg?.prerequisites ?? []).map((p) => ({ flagKey: p.key ?? "" })),
+        rulesServe: [...new Set(rulesServe)],
+        individualTargets: (cfg?.targets?.length ?? 0) > 0 || (cfg?.contextTargets?.length ?? 0) > 0,
+        ...(activeRelease !== undefined ? { activeRelease } : {}),
+        released: [...served],
+      };
+    }
+
+    return {
+      exists: true,
+      key: flagKey,
+      kind,
+      variations,
+      ...(latest ? { latestVariation: latest } : {}),
+      ...(raw.temporary !== undefined ? { temporary: raw.temporary } : {}),
+      ...(raw.tags ? { tags: raw.tags } : {}),
+      environments,
     };
   }
 
@@ -138,30 +496,42 @@ export class LdResourceWriter {
    * So wiring changes nothing for users; when the parent releases, the child
    * goes live in lockstep with it — release coordination is structural.
    *
+   * `variation` names the parent variation to pin: "on"/"off" for boolean
+   * parents; for MULTIVARIATE parents, "on" resolves PER ENVIRONMENT to the
+   * variation that environment's targeting points at (what the parent serves —
+   * or will serve — when live), "off" to its off-variation, and an explicit
+   * value ("v2") pins exactly that. LaunchDarkly prerequisites pin a single
+   * variationId, so when a parent later iterates v1→v2 Beacon re-points
+   * children as part of the variation release (see beacon/trigger.ts).
+   *
    * Idempotent: environments already wired (prerequisite present + flag on)
    * are skipped. Throws only when nothing could be applied (missing parent,
    * no matching variation).
    */
-  async addPrerequisite(childKey: string, parentKey: string, variation: "on" | "off" = "on"): Promise<string> {
-    const want = variation === "on";
-    let parent: { data: { variations?: Array<{ _id?: string; value?: unknown }> } };
+  async addPrerequisite(
+    childKey: string,
+    parentKey: string,
+    variation: string = "on",
+    childVariation?: string,
+  ): Promise<string> {
+    let parent: { data: PrereqFlag };
     try {
-      parent = await this.ld.getFlag(parentKey);
+      parent = await this.ld.getFlag<PrereqFlag>(parentKey);
     } catch {
       throw new Error(`parent flag '${parentKey}' not found in project '${this.ld.projectKey}'`);
     }
-    const parentVar = (parent.data.variations ?? []).find((v) => v.value === want);
-    if (!parentVar?._id) {
-      throw new Error(`parent flag '${parentKey}' has no boolean '${variation}' variation`);
-    }
 
-    const child = await this.ld.getFlag<{
-      variations?: Array<{ _id?: string; value?: unknown }>;
-      environments?: Record<string, { on?: boolean; prerequisites?: Array<{ key?: string }> }>;
-    }>(childKey);
-    const treatment = (child.data.variations ?? []).find((v) => v.value === true);
+    const child = await this.ld.getFlag<PrereqFlag>(childKey);
+    const childVars = child.data.variations ?? [];
+    // Child treatment: boolean legacy → true; multivariate → the requested vN
+    // (default: the lineage tip — a fresh child's v1, an iterated child's latest).
+    const childIsBoolean = childVars.some((v) => typeof v.value === "boolean");
+    const wantChildValue = childIsBoolean
+      ? true
+      : (childVariation ?? latestVariationValue(childVars.map((v) => v.value)));
+    const treatment = childVars.find((v) => v.value === wantChildValue);
     if (!treatment?._id) {
-      throw new Error(`flag '${childKey}' has no boolean treatment (true) variation`);
+      throw new Error(`flag '${childKey}' has no treatment variation ('${String(wantChildValue)}')`);
     }
     const envs = Object.entries(child.data.environments ?? {});
     if (envs.length === 0) throw new Error(`flag '${childKey}' reports no environments`);
@@ -177,7 +547,14 @@ export class LdResourceWriter {
       }
       const instructions: Array<Record<string, unknown>> = [];
       if (!hasPrereq) {
-        instructions.push({ kind: "addPrerequisite", key: parentKey, variationId: parentVar._id });
+        let parentVarId: string;
+        try {
+          parentVarId = resolveParentVariationId(parent.data, parentKey, env, variation);
+        } catch (e) {
+          failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
+          continue;
+        }
+        instructions.push({ kind: "addPrerequisite", key: parentKey, variationId: parentVarId });
       }
       if (!isOn) {
         // Same instruction pair Beacon's prerequisite release uses: on +

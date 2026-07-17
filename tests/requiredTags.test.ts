@@ -6,7 +6,7 @@ import { NODE_REQUIRED_TAGS, missingRequiredTags } from "@auto-factory/shared";
 describe("missingRequiredTags (forced routing-tag safety net, issue #9 item #1)", () => {
   it("reports the node's required tags as missing when absent", () => {
     // research-planner finished with no routing decision recorded.
-    assert.deepEqual(missingRequiredTags("autofactory-research-planner", {}), ["flag_worthy", "risk_score"]);
+    assert.deepEqual(missingRequiredTags("autofactory-research-planner", {}), ["flag_worthy", "flag_action", "risk_score"]);
     // metrics-author created a metric (auto tags) but never set the testing hand-off.
     assert.deepEqual(
       missingRequiredTags("autofactory-metrics-author", { metrics_created: "true", metric_keys: "x" }),
@@ -17,7 +17,10 @@ describe("missingRequiredTags (forced routing-tag safety net, issue #9 item #1)"
   });
 
   it("reports nothing missing once the required tag is present (any value)", () => {
-    assert.deepEqual(missingRequiredTags("autofactory-research-planner", { flag_worthy: "false", risk_score: "0.3" }), []);
+    assert.deepEqual(
+      missingRequiredTags("autofactory-research-planner", { flag_worthy: "false", flag_action: "none", risk_score: "0.3" }),
+      [],
+    );
     assert.deepEqual(missingRequiredTags("autofactory-metrics-author", { needs_tests: "true" }), []);
     assert.deepEqual(missingRequiredTags("autofactory-code-reviewer", { review_approved: "approve" }), []);
   });

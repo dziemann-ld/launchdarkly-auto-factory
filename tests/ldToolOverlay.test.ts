@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { SANDBOX_TOOL_DEFS, applyLdToolOverlay, buildSandboxTools } from "@auto-factory/shared";
 
 const FULL_CAPS = {
-  createFlag: true, createMetric: true, editFiles: true,
+  createFlag: true, flagState: true, createMetric: true, editFiles: true,
   writeManifest: true, queryGraph: false, readDocs: true,
 };
 
@@ -12,7 +12,7 @@ describe("LD tool overlay (ADR 0011)", () => {
   it("registry covers every capability-buildable tool", () => {
     const built = buildSandboxTools({ ...FULL_CAPS, queryGraph: true, queryRepos: true });
     for (const t of built) assert.ok(SANDBOX_TOOL_DEFS.has(t.name), `registry missing ${t.name}`);
-    assert.equal(SANDBOX_TOOL_DEFS.size, 16);
+    assert.equal(SANDBOX_TOOL_DEFS.size, 19);
   });
 
   it("no attachments → built-in defaults, unchanged (pre-tools projects)", () => {

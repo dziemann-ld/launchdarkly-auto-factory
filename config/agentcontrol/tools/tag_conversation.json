@@ -1,7 +1,7 @@
 {
   "key": "tag_conversation",
   "name": "tag_conversation",
-  "description": "Record routing tags for the AutoFactory pipeline. Call this once you've decided the outcome of your step so the chain can advance. Pass the tags your instructions specify (e.g. {\"flag_created\":\"true\"}, {\"skip_flagging\":\"true\"}, {\"needs_tests\":\"true\"}, {\"review_approved\":\"true\"}, {\"risk_level\":\"low\"}).",
+  "description": "Record routing tags for the AutoFactory pipeline. Call this once you've decided the outcome of your step so the chain can advance. Pass the DECISION tags your instructions specify (e.g. {\"flag_action\":\"create\"}, {\"skip_flagging\":\"true\"}, {\"needs_tests\":\"true\"}, {\"review_approved\":\"true\"}, {\"risk_level\":\"low\"}). Side-effect tags (flag_ready/flag_created/flag_key/flag_variation/metrics_created/metric_keys) are set by their tools on real success and are ignored here.",
   "schema": {
     "type": "object",
     "properties": {

@@ -15,9 +15,9 @@ canonical public copies of the six agents:
 
 | File | Chain position | Role |
 |------|----------------|------|
-| `autofactory-research-planner.json` | 1 | classify the PR, produce the implementation brief, create the release manifest (+ intent skeleton) |
-| `autofactory-manifest-steward.json` | 2 | normalize human `releaseIntent` edits (notes → structured fields); pass the brief through |
-| `autofactory-flag-implementer.json` | 3 | create the flag (targeting off), wire the code, correct the manifest flagKey |
+| `autofactory-research-planner.json` | 1 | classify the PR, research the flag landscape (existence + targeting/released-ness), decide the `flag_action`, produce the implementation brief, create the release manifest (+ intent skeleton) |
+| `autofactory-manifest-steward.json` | 2 | normalize human `releaseIntent` edits (notes → structured fields), carry holds forward on iteration PRs; pass the brief through |
+| `autofactory-flag-implementer.json` | 3 | execute the flag action (create multivariate flag / add vN variation / verify ride-existing / child flag w/ prerequisite), wire the code, correct the manifest flagKey + targetVariation |
 | `autofactory-metrics-author.json` | 4 | create guarded-release metrics, instrument events, write metricKeys into the manifest |
 | `autofactory-flag-testing.json` | 5 | flag-on/flag-off tests, run to green |
 | `autofactory-code-reviewer.json` | 6 | independent verdict + risk level |
@@ -73,8 +73,11 @@ the registry, the graph, and the instructions all agree.
 |-----|--------|---------|
 | `skip_flagging` | research-planner | `"true"`: this PR needs no flag (short-circuits the chain) |
 | `flag_worthy` | research-planner | the planner's flag-worthiness recommendation; advisory (no edge consumes it), but always recorded |
-| `flag_created` | flag-implementer | `"true"`: a flag was created (set automatically by `create_flag`) |
-| `flag_key` | flag-implementer | the created flag's key (set automatically by `create_flag`) |
+| `flag_action` | research-planner | the flag decision: `create` \| `extend_variation` \| `ride_existing` \| `child_flag` \| `none` — the implementer executes it, the metrics author picks its mode from it |
+| `flag_ready` | flag-implementer | `"true"`: a VERIFIED flag outcome exists (set automatically by `create_flag`, `add_variation`, or `use_existing_flag`) — gates the hand-off to the metrics author |
+| `flag_created` | flag-implementer | `"true"`: `create_flag` succeeded (informational; `flag_ready` does the routing) |
+| `flag_key` | flag-implementer | the flag's key (set automatically by the flag tools) |
+| `flag_variation` | flag-implementer | the variation this PR's code path lives under (`v1` fresh, `vN` on iterations; set automatically by the flag tools) |
 | `needs_tests` | metrics-author | `"true"`: route to the testing agent |
 | `review_approved` | code-reviewer | `"approve"`/`"approved"`/`"true"`: the change is approved |
 | `metrics_created` | metrics-author | `"true"` if any metric was created/reused (set automatically by `create_metric`) |
@@ -94,7 +97,15 @@ Each graph edge's `handoff` object may carry: `require_tags`, `skip_if_tags`,
 `capabilities` is a string array granting the **target** node tool access on the
 Anthropic provider:
 
-- `"create_flag"`: real boolean flag creation in the app project.
+- `"create_flag"`: the flag-action suite in the app project — `create_flag`
+  (real STRING MULTIVARIATE flags: `control` + `v1`, created dark; AutoFactory
+  never creates booleans), `add_variation` (append `vN` to an existing
+  multivariate flag — the iteration path when its treatment is already
+  released), and `use_existing_flag` (verify an unreleased variation covers the
+  PR with no LD change).
+- `"flag_state"`: the `get_flag_state` tool — a flag's kind, variation lineage,
+  and per-environment targeting/released-ness. Read-only; the evidence behind
+  the planner's `flag_action` decision and the implementer's verification.
 - `"create_metric"`: real guarded-release metric creation in the app project
   (off a custom event the agent instruments with `track()`).
 - `"edit_files"`: `write_file` / `edit_file` / `run_tests` / `commit_and_push`.
@@ -115,9 +126,9 @@ Anthropic provider:
 
 Put grants here so "which agent can write" is config, not code. When an edge
 omits `capabilities`, the runner falls back to a built-in per-config-key map
-(`autofactory-research-planner`: write_manifest+query_graph — the ROOT node has
-no inbound edge, so this is its only grant path; `autofactory-manifest-steward`:
-steward_manifest; `autofactory-flag-implementer`: create_flag+edit_files+
+(`autofactory-research-planner`: write_manifest+flag_state+query_graph — the ROOT
+node has no inbound edge, so this is its only grant path; `autofactory-manifest-steward`:
+steward_manifest; `autofactory-flag-implementer`: create_flag+flag_state+edit_files+
 write_manifest+read_docs; `autofactory-flag-testing`: edit_files;
 `autofactory-metrics-author`: create_metric+edit_files+write_manifest+read_docs;
 `autofactory-code-reviewer`: read_docs);

@@ -17,6 +17,7 @@ import {
   type AutomatedRelease,
   type LdClient,
 } from "@auto-factory/shared";
+import { repointDependentPrerequisites } from "./repoint.js";
 
 export interface MonitorSettings {
   enabled: boolean;
@@ -64,6 +65,10 @@ export async function monitorTriggeredRelease(
 
     if (final.status === "completed") {
       console.log(`${tag}: COMPLETED — rolled out to 100%`);
+      // A completed variation release may strand children prerequisite'd on
+      // the PREVIOUS variation — re-point auto-factory children to what the
+      // environment serves now. Never throws (logs its own outcomes).
+      await repointDependentPrerequisites(ld, flagKey, environmentKey);
     } else {
       // reverted = a guardrail metric regressed and LD rolled the flag back;
       // monitoring_stopped = a human intervened. Both are end states for us.

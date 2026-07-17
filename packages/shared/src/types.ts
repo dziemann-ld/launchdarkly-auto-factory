@@ -90,6 +90,13 @@ export interface ReleaseIntent {
 export interface ReleaseFlagFile {
   schemaVersion?: string;
   flagKey: string;
+  /**
+   * Variation this PR's code path lives under (vN lineage, schema 1.2+) —
+   * present on iteration PRs that extended an existing multivariate flag.
+   * Beacon releases exactly this variation (fallthrough vN-1 → vN); absent
+   * means a fresh flag (whole-flag release of its treatment).
+   */
+  targetVariation?: string;
   /** Defaults to "frontend" when omitted (matches reference behavior). */
   scope?: Scope;
   /** Agent-computed parameters (canonical key since schema 1.1). */

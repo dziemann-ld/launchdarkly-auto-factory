@@ -15,6 +15,62 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-07-17
+
+### ✅ Multivariate flags + iteration-aware flagging (fixes the flag_created stall; ADR 0013)
+- **Postmortem (weathersynth PR #14, design-partner report):** a follow-up PR that only
+  tweaked code already gated by `enable-maximized-layout` stalled the chain forever.
+  The implementer correctly decided "no new flag needed", but the
+  flag-implementer → metrics-author edge required the tool-owned `flag_created=true`,
+  which only a `create_flag` call can set — the agent was penalized for being honest.
+  Structural: EVERY iteration PR on already-flagged code failed this way.
+- **Philosophy shift (design locked with Tom 2026-07-17):** flags are no longer 0→1
+  booleans. `create_flag` now creates **string multivariate** flags (variations
+  `control` + `v1`, created dark); iterations on RELEASED behavior append `v2`, `v3`, …
+  instead of mutating served code paths — deploy stays decoupled from release across
+  follow-up PRs, and a guarded rollback returns users to vN-1, not to off.
+- **New decision: `flag_action` (research planner):** create | extend_variation |
+  ride_existing | child_flag | none, decided from TARGETING evidence (a new
+  `get_flag_state` tool: kind, variation lineage, per-env released-ness verdicts), not
+  mere flag existence. Unreleased treatment → ride it; released/mid-release → extend
+  (multivariate) or child flag (legacy boolean — LD fixes kind at creation, booleans
+  can never take variations). Forced via NODE_REQUIRED_TAGS.
+- **New tools (implementer):** `add_variation` (append vN; idempotent per intended
+  value; refuses boolean flags with child-flag guidance) and `use_existing_flag`
+  (VERIFIES the ridden variation is genuinely unreleased in LD — refuses released
+  variations; the honest no-op path). Both, plus create_flag (incl. 409 reuse), set the
+  new tool-owned **`flag_ready`** tag — the graph edge now requires `flag_ready`
+  instead of `flag_created`, so a verified "nothing to create" advances the chain.
+  Also new tool-owned `flag_variation`; new edge capability token `flag_state`.
+- **Instruction updates (all synced files):** research-planner (Flag Landscape
+  targeting research + the decision matrix + `flag_action` tag + manifest
+  `targetVariation`), flag-implementer (execute-per-action, string-variation wiring
+  with fail-safe default `"control"`, F17/F19 extended to the new tools),
+  metrics-author (M01 no longer keys on flag_created; new M11: iterations reuse the
+  flag's existing metrics, feature-specific metrics are valid for vN-vs-vN-1),
+  flag-testing (T01 string-variation mocking; new T14 three-way coverage
+  control/vN-1/vN on extensions), code-reviewer (R09: control default required,
+  previous variation preserved, ride_existing is not a missing flag),
+  manifest-steward (carry `hold`/`manual` intent forward onto iteration PRs).
+- **Graph:** `edge-autofactory-flag-implementer-autofactory-metrics-author`
+  `require_tags` flag_created→**flag_ready**; steward→implementer edge capabilities
+  += `flag_state`. Registry (tags.json) + README tables updated;
+  `npm run check:configs` green.
+- **Manifest schema 1.2:** new agent-owned `targetVariation` (vN values only,
+  validated). Beacon releases exactly that variation: trigger resolves
+  original = what the env serves today / target = the manifest variation (boolean
+  flags keep whole-flag semantics); already-serving → explicit `noop`. NEW: after a
+  variation release completes (or an immediate release), Beacon **re-points
+  auto-factory children** whose prerequisite pins the parent's previous variation
+  (LD prereqs pin a variationId — without this, parent v1→v2 silently darkens
+  children). Human-built dependencies are surfaced, never rewritten.
+- **Rollout status:** code + committed configs on main; `bridge upgrade` to the live
+  LD project NOT yet run (tool defs + instructions + graph edge all sync through it).
+  Live validation pending: fresh create / pre-release ride / post-release extend with
+  guarded v2-vs-v1 / legacy-boolean child flag.
+
+---
+
 ## 2026-07-14 (later)
 
 ### ✅ Prerequisite wiring v2: on-behind-parent semantics + fixes from the first live runs

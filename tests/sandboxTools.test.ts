@@ -130,6 +130,20 @@ describe("SandboxToolExecutor — capability gating", () => {
     assert.ok(names.includes("commit_and_push"));
   });
 
+  it("createFlag grants the whole flag-action suite; flagState is separate", () => {
+    const suite = buildSandboxTools({ createFlag: true, createMetric: false, editFiles: false }).map((t) => t.name);
+    assert.ok(suite.includes("create_flag"));
+    assert.ok(suite.includes("add_variation"));
+    assert.ok(suite.includes("use_existing_flag"));
+    assert.ok(!suite.includes("get_flag_state"));
+
+    const readonly = buildSandboxTools({ createFlag: false, flagState: true, createMetric: false, editFiles: false }).map((t) => t.name);
+    assert.ok(readonly.includes("get_flag_state"));
+    assert.ok(!readonly.includes("create_flag"));
+    assert.ok(!readonly.includes("add_variation"));
+    assert.ok(!readonly.includes("use_existing_flag"));
+  });
+
   it("create_metric is offered independently of create_flag", () => {
     const names = buildSandboxTools({ createFlag: false, createMetric: true, editFiles: true }).map((t) => t.name);
     assert.ok(names.includes("create_metric"));
@@ -155,11 +169,11 @@ describe("SandboxToolExecutor — edit_file with edits enabled", () => {
 });
 
 describe("SandboxToolExecutor — create_flag fallback tagging", () => {
-  it("sets flag_created/flag_key even when the agent doesn't tag", async () => {
+  it("sets flag_created/flag_ready/flag_key/flag_variation even when the agent doesn't tag", async () => {
     const fakeWriter = {
       projectKey: "demo",
-      async createBooleanFlag(args: CreateFlagArgs): Promise<LdWriteResult> {
-        return { created: true, alreadyExists: false, key: args.key, detail: `created ${args.key}` };
+      async createFlag(args: CreateFlagArgs): Promise<LdWriteResult & { variation: string }> {
+        return { created: true, alreadyExists: false, key: args.key, variation: "v1", detail: `created ${args.key}` };
       },
     } as unknown as LdResourceWriter;
 
@@ -167,7 +181,168 @@ describe("SandboxToolExecutor — create_flag fallback tagging", () => {
     const r = await exec.execute("create_flag", { key: "enable-thing" });
     assert.equal(r.isError, undefined);
     assert.equal(exec.tags.flag_created, "true");
+    assert.equal(exec.tags.flag_ready, "true");
     assert.equal(exec.tags.flag_key, "enable-thing");
+    assert.equal(exec.tags.flag_variation, "v1");
+  });
+
+  it("409 reuse still advances the chain (flag_ready) but asserts no variation", async () => {
+    const fakeWriter = {
+      projectKey: "demo",
+      async createFlag(args: CreateFlagArgs): Promise<LdWriteResult & { variation: string }> {
+        return { created: false, alreadyExists: true, key: args.key, variation: "v1", detail: "already exists" };
+      },
+    } as unknown as LdResourceWriter;
+
+    const exec = new SandboxToolExecutor(root, fakeWriter);
+    await exec.execute("create_flag", { key: "enable-thing" });
+    assert.equal(exec.tags.flag_ready, "true");
+    assert.equal(exec.tags.flag_created, "true");
+    // The existing flag may have iterated past v1 — don't claim a variation blindly.
+    assert.equal(exec.tags.flag_variation, undefined);
+  });
+});
+
+describe("SandboxToolExecutor — add_variation", () => {
+  it("unavailable without a writer", async () => {
+    const exec = new SandboxToolExecutor(root);
+    const r = await exec.execute("add_variation", { key: "enable-x" });
+    assert.equal(r.isError, true);
+    assert.match(r.content, /not available/);
+  });
+
+  it("sets flag_ready/flag_key/flag_variation on success", async () => {
+    const fakeWriter = {
+      projectKey: "demo",
+      async addVariation(key: string, opts: { value?: string }): Promise<LdWriteResult & { variation: string }> {
+        return { created: true, alreadyExists: false, key, variation: opts.value ?? "v2", detail: "added v2" };
+      },
+    } as unknown as LdResourceWriter;
+    const exec = new SandboxToolExecutor(root, fakeWriter);
+    const r = await exec.execute("add_variation", { key: "enable-x", value: "v2" });
+    assert.equal(r.isError, undefined);
+    assert.equal(exec.tags.flag_ready, "true");
+    assert.equal(exec.tags.flag_key, "enable-x");
+    assert.equal(exec.tags.flag_variation, "v2");
+  });
+
+  it("a legacy-boolean error surfaces as a tool error with NO tags set", async () => {
+    const fakeWriter = {
+      projectKey: "demo",
+      async addVariation(): Promise<never> {
+        throw new Error("'enable-x' is a legacy BOOLEAN flag — LaunchDarkly cannot add variations to it.");
+      },
+    } as unknown as LdResourceWriter;
+    const exec = new SandboxToolExecutor(root, fakeWriter);
+    const r = await exec.execute("add_variation", { key: "enable-x" });
+    assert.equal(r.isError, true);
+    assert.match(r.content, /legacy BOOLEAN/);
+    assert.equal(exec.tags.flag_ready, undefined);
+  });
+});
+
+describe("SandboxToolExecutor — use_existing_flag", () => {
+  const stateFor = (released: string[]) => ({
+    exists: true,
+    key: "enable-x",
+    kind: "multivariate" as const,
+    variations: [{ value: "control" }, { value: "v1" }],
+    latestVariation: "v1",
+    environments: {
+      production: { on: released.length > 0, fallthroughServes: released, prerequisites: [], rulesServe: [], individualTargets: false, released },
+    },
+  });
+
+  it("verifies an unreleased variation and sets the tool-owned tags", async () => {
+    const fakeWriter = {
+      projectKey: "demo",
+      async getFlagState() {
+        return stateFor([]);
+      },
+    } as unknown as LdResourceWriter;
+    const exec = new SandboxToolExecutor(root, fakeWriter);
+    const r = await exec.execute("use_existing_flag", { key: "enable-x" });
+    assert.equal(r.isError, undefined, r.content);
+    assert.match(r.content, /NOT released/);
+    assert.equal(exec.tags.flag_ready, "true");
+    assert.equal(exec.tags.flag_key, "enable-x");
+    assert.equal(exec.tags.flag_variation, "v1"); // defaulted to the lineage tip
+  });
+
+  it("REFUSES a released variation (would re-couple deploy with release)", async () => {
+    const fakeWriter = {
+      projectKey: "demo",
+      async getFlagState() {
+        return stateFor(["v1"]);
+      },
+    } as unknown as LdResourceWriter;
+    const exec = new SandboxToolExecutor(root, fakeWriter);
+    const r = await exec.execute("use_existing_flag", { key: "enable-x", variation: "v1" });
+    assert.equal(r.isError, true);
+    assert.match(r.content, /RELEASED/);
+    assert.equal(exec.tags.flag_ready, undefined);
+  });
+
+  it("errors on a missing flag and a missing variation", async () => {
+    const fakeWriter = {
+      projectKey: "demo",
+      async getFlagState() {
+        return { exists: false, key: "nope", kind: "multivariate" as const, variations: [], environments: {} };
+      },
+    } as unknown as LdResourceWriter;
+    const exec = new SandboxToolExecutor(root, fakeWriter);
+    const missing = await exec.execute("use_existing_flag", { key: "nope" });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content, /does not exist/);
+
+    const fakeWriter2 = {
+      projectKey: "demo",
+      async getFlagState() {
+        return stateFor([]);
+      },
+    } as unknown as LdResourceWriter;
+    const exec2 = new SandboxToolExecutor(root, fakeWriter2);
+    const noVar = await exec2.execute("use_existing_flag", { key: "enable-x", variation: "v9" });
+    assert.equal(noVar.isError, true);
+    assert.match(noVar.content, /no variation 'v9'/);
+  });
+});
+
+describe("SandboxToolExecutor — get_flag_state", () => {
+  it("reports a missing flag as guidance, not an error", async () => {
+    const fakeWriter = {
+      projectKey: "demo",
+      async getFlagState(key: string) {
+        return { exists: false, key, kind: "multivariate" as const, variations: [], environments: {} };
+      },
+    } as unknown as LdResourceWriter;
+    const exec = new SandboxToolExecutor(root, fakeWriter);
+    const r = await exec.execute("get_flag_state", { key: "enable-new" });
+    assert.equal(r.isError, undefined);
+    assert.match(r.content, /does not exist/);
+  });
+
+  it("includes per-variation released-ness verdicts and sets no tags", async () => {
+    const fakeWriter = {
+      projectKey: "demo",
+      async getFlagState() {
+        return {
+          exists: true,
+          key: "enable-x",
+          kind: "multivariate" as const,
+          variations: [{ value: "control" }, { value: "v1" }],
+          latestVariation: "v1",
+          environments: {
+            production: { on: true, fallthroughServes: ["v1"], prerequisites: [], rulesServe: [], individualTargets: false, released: ["v1"] },
+          },
+        };
+      },
+    } as unknown as LdResourceWriter;
+    const exec = new SandboxToolExecutor(root, fakeWriter);
+    const r = await exec.execute("get_flag_state", { key: "enable-x" });
+    assert.equal(r.isError, undefined);
+    assert.match(r.content, /v1: RELEASED/);
+    assert.deepEqual(exec.tags, {});
   });
 });
 
@@ -263,14 +438,24 @@ describe("SandboxToolExecutor — tag_conversation tool-owned tags", () => {
     assert.equal(exec.tags.risk_level, "low");
   });
 
-  it("ignores agent-set side-effect tags (can't fake flag_created/metrics_created)", async () => {
+  it("ignores agent-set side-effect tags (can't fake flag_ready/flag_created/metrics_created)", async () => {
     const exec = new SandboxToolExecutor(root);
     const r = await exec.execute("tag_conversation", {
-      tags: { flag_created: "true", flag_key: "enable-x", metrics_created: "true", metric_keys: "x-error", needs_tests: "true" },
+      tags: {
+        flag_created: "true",
+        flag_ready: "true",
+        flag_key: "enable-x",
+        flag_variation: "v2",
+        metrics_created: "true",
+        metric_keys: "x-error",
+        needs_tests: "true",
+      },
     });
     // Side-effect tags stripped; only the decision tag survives.
     assert.equal(exec.tags.flag_created, undefined);
+    assert.equal(exec.tags.flag_ready, undefined);
     assert.equal(exec.tags.flag_key, undefined);
+    assert.equal(exec.tags.flag_variation, undefined);
     assert.equal(exec.tags.metrics_created, undefined);
     assert.equal(exec.tags.metric_keys, undefined);
     assert.equal(exec.tags.needs_tests, "true");
@@ -280,8 +465,8 @@ describe("SandboxToolExecutor — tag_conversation tool-owned tags", () => {
   it("still lets the create_flag tool set flag_created on a real success", async () => {
     const writer = {
       projectKey: "app",
-      async createBooleanFlag(args: CreateFlagArgs): Promise<LdWriteResult> {
-        return { created: true, alreadyExists: false, key: args.key, detail: "created" };
+      async createFlag(args: CreateFlagArgs): Promise<LdWriteResult & { variation: string }> {
+        return { created: true, alreadyExists: false, key: args.key, variation: "v1", detail: "created" };
       },
     } as unknown as LdResourceWriter;
     const exec = new SandboxToolExecutor(root, writer);
@@ -330,14 +515,14 @@ describe("SandboxToolExecutor — write_manifest", () => {
     assert.equal(r.isError, true);
   });
 
-  it("creates schema-1.1 manifest and injects the human-editable intent skeleton", async () => {
+  it("creates schema-1.2 manifest and injects the human-editable intent skeleton", async () => {
     const r = await agent().execute("write_manifest", {
       path: PATH,
       manifest: { flagKey: "enable-x", scope: "backend", releasePlan: { randomizationUnit: "user" } },
     });
     assert.equal(r.isError, undefined, r.content);
     const m = readManifest();
-    assert.equal(m.schemaVersion, "1.1");
+    assert.equal(m.schemaVersion, "1.2");
     assert.equal(m.flagKey, "enable-x");
     assert.equal(m.releasePlan.randomizationUnit, "user");
     assert.equal(m.releaseIntent.action, "auto");
@@ -409,9 +594,9 @@ describe("SandboxToolExecutor — write_manifest", () => {
 describe("SandboxToolExecutor — create_flag scope", () => {
   class RecordingWriter {
     lastArgs: CreateFlagArgs | undefined;
-    async createBooleanFlag(args: CreateFlagArgs): Promise<LdWriteResult> {
+    async createFlag(args: CreateFlagArgs): Promise<LdWriteResult & { variation: string }> {
       this.lastArgs = args;
-      return { created: true, alreadyExists: false, key: args.key, detail: "ok" };
+      return { created: true, alreadyExists: false, key: args.key, variation: "v1", detail: "ok" };
     }
     async createMetric(_args: CreateMetricArgs): Promise<LdWriteResult> {
       throw new Error("unused");

@@ -158,6 +158,8 @@ export class CursorAgentRunner implements AgentRunner {
     const { grant, source } = resolveGrant(req.configKey, req.capabilities);
     const caps: ToolCapabilities = {
       createFlag: grant.createFlag && this.opts.writer !== undefined,
+      // Read-only, but needs the LD connection the writer carries.
+      flagState: grant.flagState === true && this.opts.writer !== undefined,
       createMetric: grant.createMetric && this.opts.writer !== undefined,
       editFiles: grant.editFiles && this.opts.codeChangesEnabled === true,
       // Manifest writes are code changes — same global toggle as editFiles.
@@ -174,9 +176,9 @@ export class CursorAgentRunner implements AgentRunner {
         Boolean(this.opts.githubToken ?? process.env.GITHUB_TOKEN),
     };
     console.log(
-      `[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} queryRepos=${grant.queryRepos === true} → effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true} queryRepos=${caps.queryRepos === true}`,
+      `[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} flagState=${grant.flagState === true} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} queryRepos=${grant.queryRepos === true} → effective createFlag=${caps.createFlag} flagState=${caps.flagState === true} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true} queryRepos=${caps.queryRepos === true}`,
     );
-    const writer = caps.createFlag || caps.createMetric ? this.opts.writer : undefined;
+    const writer = caps.createFlag || caps.createMetric || caps.flagState ? this.opts.writer : undefined;
 
     const executor = new SandboxToolExecutor(
       this.opts.sandboxRoot,

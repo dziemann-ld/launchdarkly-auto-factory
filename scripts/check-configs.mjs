@@ -35,10 +35,11 @@ const README = "config/agentcontrol/README.md";
 
 /**
  * Tags set automatically by the sandbox write tools (sandboxTools.ts:
- * create_flag → flag_created/flag_key; create_metric → metrics_created/metric_keys).
+ * create_flag / add_variation / use_existing_flag → flag_ready/flag_created/
+ * flag_key/flag_variation; create_metric → metrics_created/metric_keys).
  * A registry tag declared `production: "tool"` must be one of these.
  */
-const TOOL_AUTO_TAGS = new Set(["flag_created", "flag_key", "metrics_created", "metric_keys"]);
+const TOOL_AUTO_TAGS = new Set(["flag_created", "flag_ready", "flag_key", "flag_variation", "metrics_created", "metric_keys"]);
 
 function listJson(dir) {
   try {

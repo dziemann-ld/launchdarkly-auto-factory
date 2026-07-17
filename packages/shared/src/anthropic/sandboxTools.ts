@@ -21,7 +21,7 @@ import type { KnowledgeGraph } from "../graph/schema.js";
 import { fileNodeId, flagNodeId, serviceNodeId } from "../graph/schema.js";
 import { blastRadius, neighbors } from "../graph/query.js";
 import type { RelatedReposClient } from "../github/relatedRepos.js";
-import type { LdResourceWriter, MetricCategory } from "./ldWriter.js";
+import { variationReleased, type LdResourceWriter, type MetricCategory } from "./ldWriter.js";
 import type { ReleaseFlagFile, Scope } from "../types.js";
 
 export interface AnthropicToolDef {
@@ -75,7 +75,7 @@ const READONLY_TOOLS: AnthropicToolDef[] = [
   {
     name: "tag_conversation",
     description:
-      "Record routing tags for the AutoFactory pipeline. Call this once you've decided the outcome of your step so the chain can advance. Pass the tags your instructions specify (e.g. {\"flag_created\":\"true\"}, {\"skip_flagging\":\"true\"}, {\"needs_tests\":\"true\"}, {\"review_approved\":\"true\"}, {\"risk_level\":\"low\"}).",
+      "Record routing tags for the AutoFactory pipeline. Call this once you've decided the outcome of your step so the chain can advance. Pass the DECISION tags your instructions specify (e.g. {\"flag_action\":\"create\"}, {\"skip_flagging\":\"true\"}, {\"needs_tests\":\"true\"}, {\"review_approved\":\"true\"}, {\"risk_level\":\"low\"}). Side-effect tags (flag_ready/flag_created/flag_key/flag_variation/metrics_created/metric_keys) are set by their tools on real success and are ignored here.",
     input_schema: {
       type: "object",
       properties: {
@@ -93,13 +93,17 @@ const READONLY_TOOLS: AnthropicToolDef[] = [
 const CREATE_FLAG_TOOL: AnthropicToolDef = {
   name: "create_flag",
   description:
-    "Create a boolean feature flag in LaunchDarkly (the app/data-plane project). Treatment=true (new behavior), Control=false (existing behavior, served when off). Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_created/flag_key tags are set for you.",
+    "Create a STRING MULTIVARIATE feature flag in LaunchDarkly (the app/data-plane project) with two variations: 'control' (existing behavior — the off-variation, served while the flag is off) and 'v1' (this PR's new behavior). AutoFactory never creates boolean flags: multivariate flags can take iteration variations (v2, v3, …) on follow-up PRs, booleans never can. Wire code by comparing the STRING variation value with a fail-safe default of 'control', e.g. variation(key, ctx, 'control') === 'v1'. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you.",
   input_schema: {
     type: "object",
     properties: {
       key: { type: "string", description: "Flag key, e.g. enable-farewell (lowercase, hyphenated)" },
       name: { type: "string", description: "Human-readable flag name" },
       description: { type: "string", description: "What the flag gates" },
+      treatment_description: {
+        type: "string",
+        description: "One line on what the v1 treatment does — stored as the v1 variation's description (variation VALUES stay control/v1/v2…; semantics go here).",
+      },
       scope: {
         type: "string",
         enum: ["frontend", "backend", "fullstack"],
@@ -110,12 +114,60 @@ const CREATE_FLAG_TOOL: AnthropicToolDef = {
       prerequisite: {
         type: "object",
         description:
-          "OPTIONAL flag dependency (cross-repo release coordination). In every environment this attaches the parent as a LaunchDarkly prerequisite AND turns this flag ON serving treatment behind it. SAFE while the parent is off: LaunchDarkly serves this flag's OFF variation (control) to everyone until the parent serves the required variation — nothing changes at wire time; when the parent releases, this feature goes live in lockstep. Pass it whenever the research brief names an exact parent flag key: the parent is looked up in the SAME LaunchDarkly project you create flags in (a different REPO does not mean a different project — estates commonly share one app project). If the parent isn't found, flag creation still succeeds and the failure is reported back to you — record it in the manifest and your brief.",
+          "OPTIONAL flag dependency (cross-repo release coordination, and the iteration path for LEGACY BOOLEAN parents). In every environment this attaches the parent as a LaunchDarkly prerequisite AND turns this flag ON serving treatment behind it. SAFE while the parent is off: LaunchDarkly serves this flag's OFF variation (control) to everyone until the parent serves the required variation — nothing changes at wire time; when the parent releases, this feature goes live in lockstep. Pass it whenever the research brief names an exact parent flag key: the parent is looked up in the SAME LaunchDarkly project you create flags in (a different REPO does not mean a different project — estates commonly share one app project). If the parent isn't found, flag creation still succeeds and the failure is reported back to you — record it in the manifest and your brief.",
         properties: {
           flagKey: { type: "string", description: "The parent flag key this flag depends on." },
-          variation: { type: "string", enum: ["on", "off"], description: "Parent variation required (default 'on')." },
+          variation: {
+            type: "string",
+            description:
+              "Parent variation required: 'on'/'off' (boolean parents; for multivariate parents 'on' resolves per environment to what the parent's targeting serves when live), or an explicit variation value like 'v2' to pin exactly that. Default 'on'.",
+          },
         },
         required: ["flagKey"],
+      },
+    },
+    required: ["key"],
+  },
+};
+
+const GET_FLAG_STATE_TOOL: AnthropicToolDef = {
+  name: "get_flag_state",
+  description:
+    "Read a LaunchDarkly flag's FULL state from the app project: whether it exists, its kind (boolean vs multivariate), its variation lineage (control/v1/v2…), and — critically — the per-environment TARGETING state: on/off, what fallthrough and rules serve, prerequisites, and any in-progress automated release, plus a computed RELEASED / not-released verdict per treatment variation. Flag existence alone is not enough to decide anything: whether the flagged behavior is already serving real traffic is what separates 'ride the existing variation' from 'mint the next one'. Call this for every flag key that gates code this PR touches (grep the diff for evaluation calls to find them). Read-only; sets no tags.",
+  input_schema: {
+    type: "object",
+    properties: { key: { type: "string", description: "Flag key to inspect, e.g. enable-maximized-layout" } },
+    required: ["key"],
+  },
+};
+
+const ADD_VARIATION_TOOL: AnthropicToolDef = {
+  name: "add_variation",
+  description:
+    "Append the next iteration variation (v2, v3, …) to an EXISTING multivariate flag in LaunchDarkly — the flag_action=extend_variation path: the flag's current treatment is already released, so this PR's changes go in a NEW variation that stays dark until it is released (deploy stays decoupled from release; a guarded release will later compare vN against vN-1). Adding a variation serves nothing by itself — always safe on a live flag. Wire the new code path under the new value (e.g. === 'v2'), keeping the prior variation's path intact. ALWAYS pass the target value from the research brief / release manifest so PR re-runs are idempotent (omitting it mints the next number). FAILS on legacy boolean flags (LaunchDarkly fixes a flag's kind at creation) — iterate those via a child flag with the boolean as prerequisite instead. After it succeeds, the flag_ready/flag_key/flag_variation tags are set for you.",
+  input_schema: {
+    type: "object",
+    properties: {
+      key: { type: "string", description: "Existing multivariate flag key" },
+      value: { type: "string", description: "Target variation value from the brief/manifest, e.g. 'v2'. Strongly recommended (idempotent re-runs)." },
+      name: { type: "string", description: "Human-readable variation name (defaults to the value)" },
+      description: { type: "string", description: "One line on what this iteration changes vs the previous variation" },
+    },
+    required: ["key"],
+  },
+};
+
+const USE_EXISTING_FLAG_TOOL: AnthropicToolDef = {
+  name: "use_existing_flag",
+  description:
+    "Verify that an EXISTING flag variation covers this PR without any LaunchDarkly change — the flag_action=ride_existing path: the flagged behavior has NOT been released yet, so this PR simply amends the code under the current treatment variation. The tool checks LaunchDarkly directly: the flag and variation must exist and the variation must NOT be serving real traffic (and no automated release in progress) — if it IS released, the call fails and you must iterate instead (add_variation, or a child flag for boolean parents). Only a successful call sets the flag_ready/flag_key/flag_variation tags that let the chain advance — this is the honest, verified alternative to creating something unnecessary. Call it AFTER your code changes are wired (or when no code change is needed), never to skip work.",
+  input_schema: {
+    type: "object",
+    properties: {
+      key: { type: "string", description: "Existing flag key that gates this PR's code" },
+      variation: {
+        type: "string",
+        description: "Variation the PR's code path lives under (e.g. 'v1', or 'true' for a legacy boolean). Defaults to the flag's latest vN / boolean treatment.",
       },
     },
     required: ["key"],
@@ -208,8 +260,10 @@ const COMMIT_PUSH_TOOL: AnthropicToolDef = {
 };
 
 export interface ToolCapabilities {
-  /** Offer `create_flag` (needs a writer). */
+  /** Offer the flag-action suite: `create_flag` + `add_variation` + `use_existing_flag` (needs a writer). */
   createFlag: boolean;
+  /** Offer `get_flag_state` (read-only targeting evidence; needs a writer's LD connection). */
+  flagState?: boolean;
   /** Offer `create_metric` (needs a writer). */
   createMetric: boolean;
   /** Offer `write_file` / `edit_file` / `commit_and_push`. */
@@ -337,7 +391,7 @@ const QUERY_RELATED_REPOS_TOOL: AnthropicToolDef = {
 const WRITE_MANIFEST_TOOL: AnthropicToolDef = {
   name: "write_manifest",
   description:
-    "Create or update the release manifest (.release-flags/pr-<N>.json). Pass only the fields you own — they are MERGED into the existing file (agent fields: flagKey, scope, releasePlan.*). The human-editable releaseIntent block is auto-initialized on first write and PRESERVED on later writes (you cannot overwrite it). The file is validated, written as schema 1.1, and committed to the PR branch automatically — do not also edit it with write_file/edit_file.",
+    "Create or update the release manifest (.release-flags/pr-<N>.json). Pass only the fields you own — they are MERGED into the existing file (agent fields: flagKey, scope, targetVariation, releasePlan.*). Set targetVariation (e.g. 'v2') whenever this PR's code path lives under a specific variation of an existing flag — Beacon releases exactly that variation on deploy; omit it for a fresh flag (whole-flag release of v1). The human-editable releaseIntent block is auto-initialized on first write and PRESERVED on later writes (you cannot overwrite it). The file is validated, written as schema 1.2, and committed to the PR branch automatically — do not also edit it with write_file/edit_file.",
   input_schema: {
     type: "object",
     properties: {
@@ -366,7 +420,10 @@ export const SANDBOX_TOOL_DEFS: ReadonlyMap<string, AnthropicToolDef> = new Map(
     READ_LD_DOCS_TOOL,
     QUERY_DEPENDENCIES_TOOL,
     QUERY_RELATED_REPOS_TOOL,
+    GET_FLAG_STATE_TOOL,
     CREATE_FLAG_TOOL,
+    ADD_VARIATION_TOOL,
+    USE_EXISTING_FLAG_TOOL,
     CREATE_METRIC_TOOL,
     LIST_METRICS_TOOL,
     WRITE_MANIFEST_TOOL,
@@ -427,7 +484,8 @@ export function buildSandboxTools(caps: ToolCapabilities): AnthropicToolDef[] {
   if (caps.readDocs) tools.push(READ_LD_DOCS_TOOL);
   if (caps.queryGraph) tools.push(QUERY_DEPENDENCIES_TOOL);
   if (caps.queryRepos) tools.push(QUERY_RELATED_REPOS_TOOL);
-  if (caps.createFlag) tools.push(CREATE_FLAG_TOOL);
+  if (caps.flagState) tools.push(GET_FLAG_STATE_TOOL);
+  if (caps.createFlag) tools.push(CREATE_FLAG_TOOL, ADD_VARIATION_TOOL, USE_EXISTING_FLAG_TOOL);
   if (caps.createMetric) tools.push(CREATE_METRIC_TOOL, LIST_METRICS_TOOL);
   if (caps.writeManifest || caps.stewardManifest) tools.push(WRITE_MANIFEST_TOOL);
   if (caps.editFiles) tools.push(WRITE_FILE_TOOL, EDIT_FILE_TOOL, RUN_TESTS_TOOL, COMMIT_PUSH_TOOL);
@@ -453,18 +511,22 @@ export interface ToolExecResult {
 export type GitMode = "push" | "workingTree";
 
 /**
- * Routing tags that assert a SIDE EFFECT actually happened. These are set ONLY by
- * their tool on a real success (create_flag → flag_created/flag_key; create_metric
- * → metrics_created/metric_keys) and are stripped from any agent-supplied
- * `tag_conversation` call. Otherwise an agent could fake e.g. `flag_created=true`
+ * Routing tags that assert a SIDE EFFECT (or a VERIFIED LaunchDarkly state)
+ * actually happened. These are set ONLY by their tool on a real success —
+ * create_flag / add_variation / use_existing_flag → flag_ready + flag_key +
+ * flag_variation (create_flag also keeps flag_created); create_metric →
+ * metrics_created/metric_keys — and are stripped from any agent-supplied
+ * `tag_conversation` call. Otherwise an agent could fake e.g. `flag_ready=true`
  * after the tool failed (a 401 on flag creation), advancing the chain — and
- * yielding a green run with no flag. Decision tags (flag_worthy, skip_flagging,
- * review_approved, risk_level, needs_tests) are the agent's judgment and stay
- * agent-settable.
+ * yielding a green run with no flag. Decision tags (flag_worthy, flag_action,
+ * skip_flagging, review_approved, risk_level, needs_tests) are the agent's
+ * judgment and stay agent-settable.
  */
 export const TOOL_OWNED_TAGS: ReadonlySet<string> = new Set([
   "flag_created",
   "flag_key",
+  "flag_ready",
+  "flag_variation",
   "metrics_created",
   "metric_keys",
 ]);
@@ -543,6 +605,12 @@ export class SandboxToolExecutor {
           return { content: this.tag(input.tags) };
         case "create_flag":
           return await this.createFlag(input);
+        case "get_flag_state":
+          return await this.getFlagStateTool(input);
+        case "add_variation":
+          return await this.addVariationTool(input);
+        case "use_existing_flag":
+          return await this.useExistingFlagTool(input);
         case "create_metric":
           return await this.createMetric(input);
         case "list_metrics":
@@ -779,23 +847,30 @@ export class SandboxToolExecutor {
     if (!this.writer) return { content: "create_flag is not available", isError: true };
     const key = String(input.key ?? "");
     const scope = this.resolveFlagScope(input, key);
-    const result = await this.writer.createBooleanFlag({
+    const result = await this.writer.createFlag({
       key,
       ...(input.name ? { name: String(input.name) } : {}),
       ...(input.description ? { description: String(input.description) } : {}),
+      ...(input.treatment_description ? { treatmentDescription: String(input.treatment_description) } : {}),
       ...(Array.isArray(input.tags) ? { tags: input.tags.map(String) } : {}),
       ...(scope ? { scope } : {}),
     });
     // Set routing tags so the chain advances even if the agent forgets to tag.
+    // flag_ready is the graph's gate (any verified flag outcome); flag_created
+    // stays for telemetry/back-compat. On 409 reuse the flag exists but may
+    // have iterated past v1, so flag_variation is only asserted on a fresh create.
     this.tags.flag_created = "true";
+    this.tags.flag_ready = "true";
     this.tags.flag_key = result.key;
+    if (result.created) this.tags.flag_variation = result.variation;
 
     // Optional prerequisite (cross-repo rollout coordination). Best-effort: the
     // flag exists either way; a failure is surfaced for the agent's brief.
     let detail = result.detail;
     const prereq = input.prerequisite as { flagKey?: unknown; variation?: unknown } | undefined;
     if (prereq && typeof prereq === "object" && typeof prereq.flagKey === "string" && prereq.flagKey) {
-      const variation = prereq.variation === "off" ? "off" : "on";
+      // "on"/"off" or an explicit parent variation value (multivariate parents).
+      const variation = typeof prereq.variation === "string" && prereq.variation.trim() ? prereq.variation.trim() : "on";
       try {
         const note = await this.writer.addPrerequisite(key, prereq.flagKey, variation);
         detail += ` ${note}`;
@@ -804,6 +879,106 @@ export class SandboxToolExecutor {
       }
     }
     return { content: detail };
+  }
+
+  /**
+   * `get_flag_state`: read-only targeting evidence for the flag_action
+   * decision. Returns the flag's kind, variation lineage, and per-environment
+   * targeting, plus a computed released-ness verdict per treatment variation
+   * (the same deterministic rule `use_existing_flag` enforces).
+   */
+  private async getFlagStateTool(input: Record<string, unknown>): Promise<ToolExecResult> {
+    if (!this.writer) return { content: "get_flag_state is not available", isError: true };
+    const key = String(input.key ?? "").trim();
+    if (!key) return { content: "get_flag_state: key is required", isError: true };
+    try {
+      const state = await this.writer.getFlagState(key);
+      if (!state.exists) {
+        return {
+          content: `flag '${key}' does not exist in project '${this.writer.projectKey}' — a flag for this behavior would be created fresh.`,
+        };
+      }
+      const verdicts = state.variations
+        .filter((v) => v.value !== "control" && v.value !== "false")
+        .map((v) => {
+          const r = variationReleased(state, v.value);
+          return `  ${v.value}: ${r.released ? "RELEASED" : "not released"} (${r.reason})`;
+        });
+      return {
+        content:
+          JSON.stringify(state, null, 1) +
+          (verdicts.length
+            ? `\n\nReleased-ness per treatment variation (rule: production environment when the flag has one, else any environment; individual QA targets don't count):\n${verdicts.join("\n")}`
+            : ""),
+      };
+    } catch (e) {
+      return {
+        content: `get_flag_state failed (${e instanceof Error ? e.message : String(e)}) — treat this flag's targeting state as UNKNOWN and say so explicitly in your brief`,
+        isError: true,
+      };
+    }
+  }
+
+  /** `add_variation`: append the next vN to a multivariate flag (iteration path). */
+  private async addVariationTool(input: Record<string, unknown>): Promise<ToolExecResult> {
+    if (!this.writer) return { content: "add_variation is not available", isError: true };
+    const key = String(input.key ?? "").trim();
+    if (!key) return { content: "add_variation: key is required", isError: true };
+    const result = await this.writer.addVariation(key, {
+      ...(input.value ? { value: String(input.value) } : {}),
+      ...(input.name ? { name: String(input.name) } : {}),
+      ...(input.description ? { description: String(input.description) } : {}),
+    });
+    // Verified flag outcome → the chain may advance (same guarantee as create_flag).
+    this.tags.flag_ready = "true";
+    this.tags.flag_key = result.key;
+    this.tags.flag_variation = result.variation;
+    return { content: result.detail };
+  }
+
+  /**
+   * `use_existing_flag`: the VERIFIED no-op path (flag_action: ride_existing).
+   * Confirms the flag + variation exist and that the variation is genuinely
+   * unreleased — only then does it set flag_ready, so "the existing flag
+   * covers this PR" is a checked LaunchDarkly fact, not an agent claim.
+   */
+  private async useExistingFlagTool(input: Record<string, unknown>): Promise<ToolExecResult> {
+    if (!this.writer) return { content: "use_existing_flag is not available", isError: true };
+    const key = String(input.key ?? "").trim();
+    if (!key) return { content: "use_existing_flag: key is required", isError: true };
+    const state = await this.writer.getFlagState(key);
+    if (!state.exists) {
+      return {
+        content: `use_existing_flag: flag '${key}' does not exist in project '${this.writer.projectKey}' — use create_flag instead`,
+        isError: true,
+      };
+    }
+    // Default candidate: the multivariate lineage tip, or a boolean flag's treatment.
+    const variation = String(input.variation ?? state.latestVariation ?? (state.kind === "boolean" ? "true" : "")).trim();
+    if (!variation || !state.variations.some((v) => v.value === variation)) {
+      return {
+        content: `use_existing_flag: flag '${key}' has no variation '${variation || "?"}' (variations: ${state.variations.map((v) => v.value).join(", ")})`,
+        isError: true,
+      };
+    }
+    const rel = variationReleased(state, variation);
+    if (rel.released) {
+      return {
+        content:
+          `use_existing_flag REFUSED: '${key}' variation '${variation}' is RELEASED (${rel.reason}). ` +
+          `Riding it would ship this PR's changes to live traffic on deploy — re-coupling deploy with release. ` +
+          `Iterate instead: add_variation for a multivariate flag, or a child flag with '${key}' as prerequisite for a legacy boolean flag.`,
+        isError: true,
+      };
+    }
+    this.tags.flag_ready = "true";
+    this.tags.flag_key = key;
+    this.tags.flag_variation = variation;
+    return {
+      content:
+        `Verified: '${key}' variation '${variation}' exists and is NOT released (${rel.reason}). ` +
+        `This PR's changes may ride it — amend the code path it gates, matching the existing wiring. flag_ready/flag_key/flag_variation tags set.`,
+    };
   }
 
   /**
@@ -951,6 +1126,17 @@ export class SandboxToolExecutor {
       }
     }
 
+    // targetVariation is a MACHINE field Beacon releases against — vN lineage
+    // values only (prose or a boolean's "true" would poison the release trigger).
+    if (inc.targetVariation !== undefined && !/^v\d+$/.test(String(inc.targetVariation))) {
+      return {
+        content:
+          `write_manifest: targetVariation must be a vN lineage value (v1, v2, …), got '${String(inc.targetVariation)}'. ` +
+          "Omit it for fresh flags and boolean legacy flags (whole-flag release).",
+        isError: true,
+      };
+    }
+
     // releaseIntent: create-if-absent for agents; steward grade may update it.
     const existingIntent = existing.releaseIntent as Record<string, unknown> | undefined;
     let intent: Record<string, unknown>;
@@ -976,7 +1162,7 @@ export class SandboxToolExecutor {
       releasePlan: _ep, releaseOverrides: _eo, releaseIntent: _ei, schemaVersion: _ev, ...existRest
     } = existing;
     const manifest: Record<string, unknown> = {
-      schemaVersion: "1.1",
+      schemaVersion: "1.2",
       ...existRest,
       ...incRest,
       releasePlan: mergedPlan,
@@ -1015,7 +1201,7 @@ export class SandboxToolExecutor {
 
     return {
       content:
-        `${existed ? "Updated" : "Created"} ${rel} (schema 1.1); ${intentNote}; ${commitNote}.` +
+        `${existed ? "Updated" : "Created"} ${rel} (schema 1.2); ${intentNote}; ${commitNote}.` +
         (issues.length ? ` Intent issues (informational): ${issues.join("; ")}` : ""),
     };
   }

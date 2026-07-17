@@ -29,9 +29,10 @@ import { type GitMode, SandboxToolExecutor, type ToolCapabilities, applyLdToolOv
 const TAGGING_NOTE = `
 
 You MUST call \`tag_conversation\` with the routing tag(s) your instructions specify
-(e.g. flag_created, skip_flagging, flag_worthy, needs_tests, review_approved,
+(e.g. skip_flagging, flag_worthy, flag_action, needs_tests, review_approved,
 risk_level). The downstream chain advances on these tags — a step that sets no tags
-stalls the pipeline.`;
+stalls the pipeline. (flag_ready/flag_created/flag_key/flag_variation are set by the
+flag tools themselves on success, never via tag_conversation.)`;
 
 /**
  * Build the execution-mode note appended to the agent's instructions, per
@@ -59,9 +60,14 @@ export function modeNote(caps: ToolCapabilities): string {
       "You have `read_ld_docs` — LaunchDarkly documentation pages as markdown. Consult it when UNCERTAIN about LaunchDarkly semantics or SDK syntax (never guess `track()`/evaluation syntax for a language the repo doesn't demonstrate); your instructions list the relevant pages, and 'llms.txt' is the full directory. Budget your fetches; a failed fetch must never block the task — fall back to the repo's existing patterns.",
     );
   }
+  if (caps.flagState) {
+    lines.push(
+      "You have `get_flag_state` — a LaunchDarkly flag's existence, kind (boolean vs multivariate), variation lineage (control/v1/v2…), and per-environment TARGETING state including a computed released-ness verdict per treatment variation. Call it for EVERY flag key gating code this PR touches (grep the diff for evaluation calls): whether the flagged behavior is already serving real traffic is what separates 'ride the existing variation' from 'iterate with a new one'. If the tool is unavailable or fails, treat targeting state as UNKNOWN and say so — never assume.",
+    );
+  }
   if (caps.createFlag) {
     lines.push(
-      "You have `create_flag` — creates a REAL boolean flag in the LaunchDarkly app project (idempotent; safe on PR re-runs). When your rules say a flag is needed, CALL it.",
+      "You have the flag-action suite (all idempotent; safe on PR re-runs): `create_flag` — creates a REAL string-multivariate flag (control + v1, dark) in the LaunchDarkly app project; `add_variation` — appends the next vN to an existing multivariate flag (the iteration path when its treatment is already released; pass the target value from the brief/manifest); `use_existing_flag` — VERIFIES an existing unreleased variation covers this PR with no LaunchDarkly change (it refuses if the variation is released). Execute the flag_action your brief decided with the matching tool — the chain advances only on a successful call (they set flag_ready/flag_key/flag_variation).",
     );
   }
   if (caps.createMetric) {
@@ -105,11 +111,13 @@ const NODE_CAPABILITIES: Record<string, ToolCapabilities> = {
   // a graph was actually composed for the run (the KG flag gates that upstream).
   // queryRepos: cross-repo impact for split-repo estates — only offered when the
   // app repo registers relatedRepos in .autofactory/services.yaml.
-  "autofactory-research-planner": { createFlag: false, createMetric: false, editFiles: false, writeManifest: true, queryGraph: true, queryRepos: true },
+  // flagState: the planner's targeting evidence for the flag_action decision
+  // (ride_existing vs extend_variation hinges on released-ness, not existence).
+  "autofactory-research-planner": { createFlag: false, flagState: true, createMetric: false, editFiles: false, writeManifest: true, queryGraph: true, queryRepos: true },
   // The steward normalizes the human-edited releaseIntent — the only node that
   // may UPDATE an existing intent block.
   "autofactory-manifest-steward": { createFlag: false, createMetric: false, editFiles: false, stewardManifest: true },
-  "autofactory-flag-implementer": { createFlag: true, createMetric: false, editFiles: true, writeManifest: true, readDocs: true },
+  "autofactory-flag-implementer": { createFlag: true, flagState: true, createMetric: false, editFiles: true, writeManifest: true, readDocs: true },
   "autofactory-flag-testing": { createFlag: false, createMetric: false, editFiles: true },
   // The metrics author creates LD metrics and instruments the event (track()) that
   // feeds them — so it needs create_metric AND edit_files (+ manifest updates).
@@ -130,9 +138,11 @@ const NODE_CAPABILITIES: Record<string, ToolCapabilities> = {
  * graph side is guarded separately by `npm run check:configs`.
  */
 export const NODE_REQUIRED_TAGS: Record<string, string[]> = {
-  // Always decides flag-worthiness AND a numeric risk score — risk-threshold
-  // gates fail closed when risk_score is missing, so force it.
-  "autofactory-research-planner": ["flag_worthy", "risk_score"],
+  // Always decides flag-worthiness, the flag ACTION (create / extend_variation /
+  // ride_existing / child_flag / none — the implementer executes it, the
+  // metrics author picks its mode from it), AND a numeric risk score —
+  // risk-threshold gates fail closed when risk_score is missing, so force it.
+  "autofactory-research-planner": ["flag_worthy", "flag_action", "risk_score"],
   "autofactory-metrics-author": ["needs_tests"], // always hands off to testing
   "autofactory-code-reviewer": ["review_approved"], // always produces a verdict
 };
@@ -144,6 +154,7 @@ export function missingRequiredTags(configKey: string, tags: Record<string, stri
 
 /** Capability tokens recognized on a graph edge's `capabilities` array. */
 export const CAP_CREATE_FLAG = "create_flag";
+export const CAP_FLAG_STATE = "flag_state";
 export const CAP_CREATE_METRIC = "create_metric";
 export const CAP_EDIT_FILES = "edit_files";
 export const CAP_WRITE_MANIFEST = "write_manifest";
@@ -165,6 +176,7 @@ export function resolveGrant(
     return {
       grant: {
         createFlag: capabilities.includes(CAP_CREATE_FLAG),
+        flagState: capabilities.includes(CAP_FLAG_STATE),
         createMetric: capabilities.includes(CAP_CREATE_METRIC),
         editFiles: capabilities.includes(CAP_EDIT_FILES),
         writeManifest: capabilities.includes(CAP_WRITE_MANIFEST),
@@ -230,6 +242,8 @@ export class AnthropicAgentRunner implements AgentRunner {
     const { grant, source } = resolveGrant(req.configKey, req.capabilities);
     const caps: ToolCapabilities = {
       createFlag: grant.createFlag && this.opts.writer !== undefined,
+      // Read-only, but needs the LD connection the writer carries.
+      flagState: grant.flagState === true && this.opts.writer !== undefined,
       createMetric: grant.createMetric && this.opts.writer !== undefined,
       editFiles: grant.editFiles && this.opts.codeChangesEnabled === true,
       // Manifest writes are code changes — same global toggle as editFiles.
@@ -248,9 +262,9 @@ export class AnthropicAgentRunner implements AgentRunner {
     // Per-node diagnostic: makes a renamed/added agent that silently lost its
     // grant (source "none", read-only) visible in the run logs.
     console.log(
-      `[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} queryRepos=${grant.queryRepos === true} → effective createFlag=${caps.createFlag} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true} queryRepos=${caps.queryRepos === true}`,
+      `[node] ${req.configKey} grant(${source}): createFlag=${grant.createFlag} flagState=${grant.flagState === true} createMetric=${grant.createMetric} editFiles=${grant.editFiles} readDocs=${grant.readDocs === true} queryGraph=${grant.queryGraph === true} queryRepos=${grant.queryRepos === true} → effective createFlag=${caps.createFlag} flagState=${caps.flagState === true} createMetric=${caps.createMetric} editFiles=${caps.editFiles} readDocs=${caps.readDocs === true} queryGraph=${caps.queryGraph === true} queryRepos=${caps.queryRepos === true}`,
     );
-    const writer = caps.createFlag || caps.createMetric ? this.opts.writer : undefined;
+    const writer = caps.createFlag || caps.createMetric || caps.flagState ? this.opts.writer : undefined;
 
     const system = (req.instructions ?? "") + modeNote(caps);
     const model = anthropicModelId(req.model);

@@ -1,0 +1,17 @@
+{
+  "key": "get_flag_state",
+  "name": "get_flag_state",
+  "description": "Read a LaunchDarkly flag's FULL state from the app project: whether it exists, its kind (boolean vs multivariate), its variation lineage (control/v1/v2…), and — critically — the per-environment TARGETING state: on/off, what fallthrough and rules serve, prerequisites, and any in-progress automated release, plus a computed RELEASED / not-released verdict per treatment variation. Flag existence alone is not enough to decide anything: whether the flagged behavior is already serving real traffic is what separates 'ride the existing variation' from 'mint the next one'. Call this for every flag key that gates code this PR touches (grep the diff for evaluation calls to find them). Read-only; sets no tags.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "key": {
+        "type": "string",
+        "description": "Flag key to inspect, e.g. enable-maximized-layout"
+      }
+    },
+    "required": [
+      "key"
+    ]
+  }
+}

@@ -25,7 +25,15 @@
       "readBy": [],
       "description": "The research planner's flag-worthiness recommendation. Advisory: no edge or approval logic consumes it (skip_flagging is the actual routing signal). Forced by NODE_REQUIRED_TAGS so the planner always records a recommendation."
     },
-    "flag_created": {
+    "flag_action": {
+      "producedBy": "autofactory-research-planner",
+      "production": "llm",
+      "role": "advisory",
+      "edges": [],
+      "readBy": [],
+      "description": "The planner's flag decision: create | extend_variation | ride_existing | child_flag | none. The implementer executes it with the matching tool (create_flag / add_variation / use_existing_flag / create_flag-with-prerequisite); the metrics author picks its mode from it. Forced by NODE_REQUIRED_TAGS. No edge routes on it directly — flag_ready is the verified gate."
+    },
+    "flag_ready": {
       "producedBy": "autofactory-flag-implementer",
       "production": "tool",
       "role": "routing",
@@ -37,7 +45,15 @@
         }
       ],
       "readBy": [],
-      "description": "true when a flag was created. Set automatically by the create_flag tool. Gates the hand-off to the metrics author."
+      "description": "true when a VERIFIED flag outcome exists: create_flag succeeded (incl. 409 reuse), add_variation appended an iteration variation, or use_existing_flag confirmed an unreleased variation covers the PR. Set only by those tools — never by the agent. Gates the hand-off to the metrics author (replaced flag_created there: an honest 'nothing to create' must not stall the chain)."
+    },
+    "flag_created": {
+      "producedBy": "autofactory-flag-implementer",
+      "production": "tool",
+      "role": "informational",
+      "edges": [],
+      "readBy": [],
+      "description": "true when create_flag succeeded (a flag exists — fresh or 409 reuse). Informational since flag_ready took over edge routing; kept for telemetry and back-compat."
     },
     "flag_key": {
       "producedBy": "autofactory-flag-implementer",
@@ -47,7 +63,17 @@
       "readBy": [
         "manifest"
       ],
-      "description": "The created flag's key. Set automatically by create_flag. Used for the release manifest and the editor's LaunchDarkly links."
+      "description": "The flag's key. Set automatically by create_flag / add_variation / use_existing_flag. Used for the release manifest and the editor's LaunchDarkly links."
+    },
+    "flag_variation": {
+      "producedBy": "autofactory-flag-implementer",
+      "production": "tool",
+      "role": "informational",
+      "edges": [],
+      "readBy": [
+        "manifest"
+      ],
+      "description": "The variation this PR's code path lives under (v1 on a fresh create, vN from add_variation / use_existing_flag). Downstream agents scope metrics/tests to it; the manifest's targetVariation should match it on iteration PRs."
     },
     "needs_tests": {
       "producedBy": "autofactory-metrics-author",

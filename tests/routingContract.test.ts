@@ -54,7 +54,7 @@ function buildChain(): AgentGraphDefinition {
     root: KEYS.research,
     edges: {
       [KEYS.research]: [{ key: KEYS.flag, handoff: { skip_if_tags: { skip_flagging: "true" } } }],
-      [KEYS.flag]: [{ key: KEYS.metrics, handoff: { require_tags: { flag_created: "true" } } }],
+      [KEYS.flag]: [{ key: KEYS.metrics, handoff: { require_tags: { flag_ready: "true" } } }],
       [KEYS.metrics]: [{ key: KEYS.test, handoff: { require_tags: { needs_tests: "true" } } }],
       [KEYS.test]: [{ key: KEYS.review }],
     },
@@ -83,7 +83,7 @@ describe("routing contract: PR-shape fixtures (walk → interpret → decide)", 
   it("flag-worthy PR runs the full chain and APPROVES", async () => {
     const w = await runShape({
       [KEYS.research]: { tags: { flag_worthy: "true" } },
-      [KEYS.flag]: { tags: { flag_created: "true" } },
+      [KEYS.flag]: { tags: { flag_ready: "true", flag_created: "true" } },
       [KEYS.metrics]: { tags: { metrics_created: "true", metric_keys: "k-error-rate", needs_tests: "true" } },
       [KEYS.review]: { tags: { review_approved: "approve", risk_level: "low" } },
     });
@@ -107,7 +107,7 @@ describe("routing contract: PR-shape fixtures (walk → interpret → decide)", 
   it("rejected PR runs the full chain and REJECTS (not incomplete)", async () => {
     const w = await runShape({
       [KEYS.research]: { tags: { flag_worthy: "true" } },
-      [KEYS.flag]: { tags: { flag_created: "true" } },
+      [KEYS.flag]: { tags: { flag_ready: "true", flag_created: "true" } },
       [KEYS.metrics]: { tags: { needs_tests: "true" } },
       [KEYS.review]: { tags: { review_approved: "reject", risk_level: "high" } },
     });
@@ -121,7 +121,7 @@ describe("routing contract: PR-shape fixtures (walk → interpret → decide)", 
   it("stall at metrics-author (needs_tests never set) → INCOMPLETE, not REJECTED (issue #9 failure mode #2)", async () => {
     const w = await runShape({
       [KEYS.research]: { tags: { flag_worthy: "true" } },
-      [KEYS.flag]: { tags: { flag_created: "true" } },
+      [KEYS.flag]: { tags: { flag_ready: "true", flag_created: "true" } },
       [KEYS.metrics]: { tags: { metrics_created: "true" } }, // forgot needs_tests
     });
     assert.deepEqual(path(w), [KEYS.research, KEYS.flag, KEYS.metrics]);
@@ -132,10 +132,10 @@ describe("routing contract: PR-shape fixtures (walk → interpret → decide)", 
     assert.doesNotMatch(d.reason, /reject/i);
   });
 
-  it("stall at flag-implementer (no flag_created) → INCOMPLETE", async () => {
+  it("stall at flag-implementer (no verified flag outcome — no tool set flag_ready) → INCOMPLETE", async () => {
     const w = await runShape({
       [KEYS.research]: { tags: { flag_worthy: "true" } },
-      [KEYS.flag]: { tags: {} }, // ran but created no flag
+      [KEYS.flag]: { tags: {} }, // ran but no flag tool succeeded (create/add_variation/use_existing)
     });
     assert.deepEqual(path(w), [KEYS.research, KEYS.flag]);
     assert.equal(w.stalledAt?.node, KEYS.flag);

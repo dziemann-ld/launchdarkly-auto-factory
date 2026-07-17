@@ -7,4 +7,5 @@ export * from "./github.js";
 export * from "./state.js";
 export * from "./railway.js";
 export * from "./monitor.js";
+export * from "./repoint.js";
 export { createApp, type BeaconDeps } from "./server.js";

@@ -7,7 +7,7 @@ describe("resolveGrant", () => {
   it("uses edge capabilities when present (source=edge)", () => {
     const r = resolveGrant("anything", ["create_flag", "edit_files"]);
     assert.deepEqual(r.grant, {
-      createFlag: true, createMetric: false, editFiles: true, writeManifest: false, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
+      createFlag: true, flagState: false, createMetric: false, editFiles: true, writeManifest: false, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
     });
     assert.equal(r.source, "edge");
   });
@@ -15,7 +15,7 @@ describe("resolveGrant", () => {
   it("maps create_metric / write_manifest / steward_manifest from the edge list", () => {
     const r = resolveGrant("anything", ["create_metric", "edit_files", "write_manifest"]);
     assert.deepEqual(r.grant, {
-      createFlag: false, createMetric: true, editFiles: true, writeManifest: true, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
+      createFlag: false, flagState: false, createMetric: true, editFiles: true, writeManifest: true, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
     });
     const s = resolveGrant("anything", ["steward_manifest"]);
     assert.equal(s.grant.stewardManifest, true);
@@ -23,10 +23,17 @@ describe("resolveGrant", () => {
     assert.equal(s.grant.editFiles, false);
   });
 
+  it("maps flag_state from the edge list", () => {
+    const r = resolveGrant("anything", ["flag_state"]);
+    assert.equal(r.grant.flagState, true);
+    assert.equal(r.grant.createFlag, false);
+    assert.equal(r.source, "edge");
+  });
+
   it("an empty edge list grants nothing (still source=edge, overrides fallback)", () => {
     const r = resolveGrant("autofactory-flag-implementer", []);
     assert.deepEqual(r.grant, {
-      createFlag: false, createMetric: false, editFiles: false, writeManifest: false, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
+      createFlag: false, flagState: false, createMetric: false, editFiles: false, writeManifest: false, stewardManifest: false, queryGraph: false, readDocs: false, queryRepos: false,
     });
     assert.equal(r.source, "edge");
   });
@@ -35,6 +42,7 @@ describe("resolveGrant", () => {
     const impl = resolveGrant("autofactory-flag-implementer", undefined);
     assert.equal(impl.source, "fallback");
     assert.equal(impl.grant.createFlag, true);
+    assert.equal(impl.grant.flagState, true);
     assert.equal(impl.grant.editFiles, true);
     assert.equal(impl.grant.writeManifest, true);
 
@@ -59,6 +67,8 @@ describe("resolveGrant", () => {
     // Same for queryRepos: granted here, offered only when relatedRepos are
     // registered and a GitHub token is present.
     assert.equal(r.grant.queryRepos, true);
+    // flagState: the planner's targeting evidence for the flag_action decision.
+    assert.equal(r.grant.flagState, true);
   });
 
   it("the steward gets steward_manifest via fallback", () => {

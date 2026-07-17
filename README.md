@@ -175,7 +175,9 @@ To run on the **Cursor** provider instead, copy `bootstrap/github-action-templat
 Write the change normally, with no flag. The chain runs on every PR
 (opened/synchronize/reopened) and takes a few minutes. On a flag-worthy PR you get:
 
-- a boolean flag in the app project, targeting **off** in all environments
+- a string multivariate flag in the app project (`control` + `v1`), targeting **off** in all
+  environments — follow-up PRs iterate it with new variations (`v2`, `v3`, …) or ride an
+  unreleased one instead of stalling
 - commits on the PR branch: flag wiring, metric instrumentation plus the release manifest,
   and flag-on/flag-off tests
 - three guarded-release metrics (error, latency, business) wired to the instrumented events
@@ -263,7 +265,7 @@ of what a deployment involves (details in [packages/beacon/README.md](packages/b
    release to completion.
 
 Known limitations: the deploy-state store is a local JSON file (single instance, mount a
-volume to survive redeploys); boolean flags only.
+volume to survive redeploys).
 
 ## Development
 

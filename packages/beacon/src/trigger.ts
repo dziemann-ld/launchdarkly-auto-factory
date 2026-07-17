@@ -2,13 +2,21 @@
  * Release trigger. Resolves the flag's variations, picks the release method
  * (override → sensible default), and executes via the shared release adapter.
  *
- * Scope note (prototype): handles BOOLEAN flags (off=false → on=true). Precedence
- * for the rollout shape is overrides > the flag's configured release policy
- * (read via getReleasePolicy) > the demo defaults below.
+ * Handles both flag shapes:
+ *  - BOOLEAN (legacy): off=false → on=true, whole-flag release.
+ *  - MULTIVARIATE (AutoFactory lineage control/v1/v2…): releases the manifest's
+ *    `targetVariation` (else the lineage tip) FROM whatever the environment
+ *    serves today — a first release moves control→v1; an iteration release
+ *    moves v1→v2 on an already-on flag, and a guarded rollback returns users
+ *    to v1, not to off.
+ *
+ * Precedence for the rollout shape is overrides > the flag's configured
+ * release policy (read via getReleasePolicy) > the demo defaults below.
  */
 
 import {
   getReleasePolicy,
+  latestVariationValue,
   normalizeReleaseIntent,
   startRelease,
   type DiscoveredFlag,
@@ -35,10 +43,17 @@ const DEFAULT_GUARDED_STAGES: Stage[] = [
 ];
 const DEFAULT_RANDOMIZATION_UNIT = "user";
 
+interface FlagEnvConfig {
+  on?: boolean;
+  offVariation?: number;
+  fallthrough?: { variation?: number; rollout?: { variations?: Array<{ variation?: number; weight?: number }> } };
+}
+
 interface FlagVariations {
   variations?: Array<{ _id: string; value: unknown }>;
+  defaults?: { onVariation?: number; offVariation?: number };
   /** Present when the flag is fetched with `?env=<key>`. */
-  environments?: Record<string, { on?: boolean }>;
+  environments?: Record<string, FlagEnvConfig>;
 }
 
 export interface TriggerResult {
@@ -47,10 +62,49 @@ export interface TriggerResult {
    * The release method used, or an intent outcome: "held" (releaseIntent said
    * hold/manual, a future notBefore, a not-yet-executable ask like segments, or
    * an unintelligible intent — fail-closed) / "prerequisites" (flag turned on
-   * behind LD prerequisites; it releases when its parents do).
+   * behind LD prerequisites; it releases when its parents do) / "noop" (the
+   * target variation is already what the environment serves — e.g. a re-deploy
+   * after the release completed).
    */
-  method: ReleaseKind | "held" | "prerequisites";
+  method: ReleaseKind | "held" | "prerequisites" | "noop";
   note?: string;
+}
+
+type Variation = { _id: string; value: unknown };
+
+/**
+ * The variation an environment currently serves to real traffic: fallthrough
+ * (single, else the heaviest rollout arm) when on; the off-variation when off.
+ */
+function servedVariation(variations: Variation[], cfg: FlagEnvConfig | undefined): Variation | undefined {
+  const at = (idx: number | undefined) => (idx === undefined ? undefined : variations[idx]);
+  if (cfg?.on === true) {
+    const single = at(cfg.fallthrough?.variation);
+    if (single) return single;
+    const arms = [...(cfg.fallthrough?.rollout?.variations ?? [])].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+    const heaviest = at(arms[0]?.variation);
+    if (heaviest) return heaviest;
+  }
+  return at(cfg?.offVariation);
+}
+
+/**
+ * The parent variation a prerequisite should pin. Boolean parents: on→true /
+ * off→false. Multivariate parents: "on" → what the parent's targeting points
+ * at in this environment (what it serves, or will serve, when live); "off" →
+ * its off-variation. Mirrors the wire-time resolution in shared/ldWriter.
+ */
+function parentPinVariation(parent: FlagVariations, environmentKey: string, want: "on" | "off"): Variation | undefined {
+  const variations = parent.variations ?? [];
+  const isBoolean = variations.some((v) => typeof v.value === "boolean");
+  if (isBoolean) return variations.find((v) => v.value === (want === "on"));
+  const cfg = parent.environments?.[environmentKey];
+  const at = (idx: number | undefined) => (idx === undefined ? undefined : variations[idx]);
+  if (want === "off") return at(cfg?.offVariation) ?? at(parent.defaults?.offVariation);
+  const single = at(cfg?.fallthrough?.variation);
+  if (single) return single;
+  const arms = [...(cfg?.fallthrough?.rollout?.variations ?? [])].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+  return at(arms[0]?.variation) ?? at(parent.defaults?.onVariation);
 }
 
 export async function triggerRelease(
@@ -95,18 +149,53 @@ export async function triggerRelease(
 
   const { data } = await ld.getFlag<FlagVariations>(flag.flagKey, `?env=${encodeURIComponent(environmentKey)}`);
   const variations = data.variations ?? [];
-  const onVar = variations.find((v) => v.value === true);
-  const offVar = variations.find((v) => v.value === false);
-  if (!onVar || !offVar) {
-    throw new Error(
-      `Prototype supports boolean flags only; '${flag.flagKey}' has no true/false variations`,
-    );
+  const envCfg = data.environments?.[environmentKey];
+  const isBoolean = variations.some((v) => typeof v.value === "boolean");
+
+  // Resolve WHAT this release moves users FROM and TO.
+  let originalVar: Variation;
+  let targetVar: Variation;
+  if (isBoolean) {
+    // Legacy boolean: whole-flag release, off(false) → on(true).
+    const onVar = variations.find((v) => v.value === true);
+    const offVar = variations.find((v) => v.value === false);
+    if (!onVar || !offVar) {
+      throw new Error(`boolean flag '${flag.flagKey}' has no true/false variations`);
+    }
+    originalVar = offVar;
+    targetVar = onVar;
+  } else {
+    // Multivariate lineage: target = manifest targetVariation, else the tip.
+    const targetValue = flag.targetVariation ?? latestVariationValue(variations.map((v) => v.value));
+    if (!targetValue) {
+      throw new Error(`multivariate flag '${flag.flagKey}' has no vN lineage variation to release`);
+    }
+    const t = variations.find((v) => v.value === targetValue);
+    if (!t) {
+      throw new Error(`'${flag.flagKey}' has no variation '${targetValue}' (manifest targetVariation?)`);
+    }
+    targetVar = t;
+    // Original = what the environment serves today (control on a dark flag;
+    // vN-1 on an iteration) — also what a guarded rollback returns users to.
+    const served = servedVariation(variations, envCfg) ?? variations.find((v) => v.value === "control");
+    if (!served) {
+      throw new Error(`'${flag.flagKey}' has no resolvable current variation in '${environmentKey}'`);
+    }
+    originalVar = served;
+    if (originalVar._id === targetVar._id) {
+      return {
+        flagKey: flag.flagKey,
+        method: "noop",
+        note: `'${String(targetVar.value)}' is already what '${environmentKey}' serves — nothing to release (re-deploy after completion?)`,
+      };
+    }
   }
   // Auto-factory flags are created DARK (targeting off) — merge ≠ release. LD
   // refuses to start an automated release on an off flag ("flag … is off",
   // confirmed live), so the same semantic patch turns targeting on; the release
   // instruction owns the fallthrough, so no traffic shifts except via stages.
-  const flagIsOn = data.environments?.[environmentKey]?.on === true;
+  // (Iteration releases run on an already-on flag — no turnFlagOn needed.)
+  const flagIsOn = envCfg?.on === true;
 
   // Prerequisites intent: LD-native — attach the parent flag(s) as prerequisites
   // and turn this flag ON serving treatment. It then releases exactly when its
@@ -124,18 +213,17 @@ export async function triggerRelease(
           note: `releaseIntent prerequisite '${p.flagKey}' could not be read — held (fail-closed)${intentContext ? ` (${intentContext})` : ""}`,
         };
       }
-      const want = (p.variation ?? "on") === "on";
-      const parentVar = (parent.data.variations ?? []).find((v) => v.value === want);
+      const parentVar = parentPinVariation(parent.data, environmentKey, p.variation ?? "on");
       if (!parentVar) {
         return {
           flagKey: flag.flagKey,
           method: "held",
-          note: `releaseIntent prerequisite '${p.flagKey}' has no boolean '${p.variation ?? "on"}' variation — held${intentContext ? ` (${intentContext})` : ""}`,
+          note: `releaseIntent prerequisite '${p.flagKey}' has no resolvable '${p.variation ?? "on"}' variation — held${intentContext ? ` (${intentContext})` : ""}`,
         };
       }
       instructions.push({ kind: "addPrerequisite", key: p.flagKey, variationId: parentVar._id });
     }
-    instructions.push({ kind: "turnFlagOn" }, { kind: "updateFallthroughVariationOrRollout", variationId: onVar._id });
+    instructions.push({ kind: "turnFlagOn" }, { kind: "updateFallthroughVariationOrRollout", variationId: targetVar._id });
     await ld.patchFlagSemantic(
       flag.flagKey,
       environmentKey,
@@ -170,8 +258,8 @@ export async function triggerRelease(
       flag.flagKey,
       environmentKey,
       [
-        { kind: "turnFlagOn" },
-        { kind: "updateFallthroughVariationOrRollout", variationId: onVar._id },
+        ...(flagIsOn ? [] : [{ kind: "turnFlagOn" }]),
+        { kind: "updateFallthroughVariationOrRollout", variationId: targetVar._id },
       ],
       "auto-factory: immediate release",
     );
@@ -194,8 +282,8 @@ export async function triggerRelease(
     environmentKey,
     turnFlagOn: !flagIsOn,
     releaseKind: method,
-    originalVariationId: offVar._id,
-    targetVariationId: onVar._id,
+    originalVariationId: originalVar._id,
+    targetVariationId: targetVar._id,
     randomizationUnit: ov.randomizationUnit ?? policy?.randomizationUnit ?? DEFAULT_RANDOMIZATION_UNIT,
     stages,
     ...(ov.extensionDurationMillis !== undefined
