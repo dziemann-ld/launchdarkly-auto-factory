@@ -64,6 +64,14 @@ Status legend: ✅ done · 🔜 planned/in progress
   auto-factory children** whose prerequisite pins the parent's previous variation
   (LD prereqs pin a variationId — without this, parent v1→v2 silently darkens
   children). Human-built dependencies are surfaced, never rewritten.
+- **Live-validation fix (same day, runs a/b/d):** all three flag_action paths ran GREEN
+  on their first live PRs (#12 create, #13 ride_existing — the exact formerly-stalling
+  shape, #14 child_flag). Run (d) exposed a semantic bug: the child flag was armed
+  on-behind-parent while the parent was ALREADY released, so its prerequisite was
+  pre-satisfied and the new behavior would have gone live at deploy. Fix:
+  `addPrerequisite` arms ONLY while the prerequisite is UNMET; a met prerequisite
+  attaches as a structural constraint and the child stays DARK for its own release
+  (create_flag tool description + P01 updated to match).
 - **Rollout status:** code + committed configs on main; `bridge upgrade` to the live
   LD project NOT yet run (tool defs + instructions + graph edge all sync through it).
   Live validation pending: fresh create / pre-release ride / post-release extend with

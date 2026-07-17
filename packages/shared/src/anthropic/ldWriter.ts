@@ -221,6 +221,24 @@ interface PrereqFlag {
 }
 
 /**
+ * The variation id a parent flag CURRENTLY serves to real traffic in `env`:
+ * fallthrough (single, else the heaviest rollout arm, else the default
+ * on-variation) when on; the off-variation when off. Used to decide whether a
+ * prerequisite is already MET at wire time.
+ */
+function servedParentVariationId(parent: PrereqFlag, env: string): string | undefined {
+  const vars = parent.variations ?? [];
+  const byIndex = (idx: number | undefined): string | undefined => (idx === undefined ? undefined : vars[idx]?._id);
+  const cfg = parent.environments?.[env];
+  if (!cfg) return undefined;
+  if (cfg.on !== true) return byIndex(cfg.offVariation) ?? byIndex(parent.defaults?.offVariation);
+  const single = byIndex(cfg.fallthrough?.variation);
+  if (single) return single;
+  const arms = [...(cfg.fallthrough?.rollout?.variations ?? [])].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+  return byIndex(arms[0]?.variation) ?? byIndex(parent.defaults?.onVariation);
+}
+
+/**
  * Which parent variation a prerequisite should pin in `env`.
  * Boolean parents: "on" → true, "off" → false (same id in every env).
  * Multivariate parents: an explicit value ("v2") wins; "on" resolves to what
@@ -490,11 +508,17 @@ export class LdResourceWriter {
    * (beacon/src/trigger.ts), applied at creation time: attach the
    * prerequisite, turn the child ON, and point its fallthrough at treatment.
    *
-   * SAFE ON AN OFF PARENT BY LD SEMANTICS: while the parent serves a
-   * variation other than the required one, LaunchDarkly serves the child's
-   * OFF variation (control) to every context, even though the child is on.
-   * So wiring changes nothing for users; when the parent releases, the child
-   * goes live in lockstep with it — release coordination is structural.
+   * TWO MODES, decided per environment by whether the prerequisite is MET:
+   *  - UNMET (parent doesn't serve the required variation yet): attach the
+   *    prerequisite AND turn the child on serving treatment behind it. Safe by
+   *    LD semantics — while the parent serves another variation, LaunchDarkly
+   *    serves the child's OFF variation (control) to everyone — and it makes
+   *    the parent's release the child's release, in lockstep.
+   *  - MET (parent already serves it — e.g. iterating on a RELEASED feature):
+   *    attach the prerequisite only and leave the child DARK. Arming here
+   *    would put the child live the moment its code deploys (re-coupling
+   *    deploy with release); instead it releases through its own normal flow,
+   *    structurally gated by the prerequisite.
    *
    * `variation` names the parent variation to pin: "on"/"off" for boolean
    * parents; for MULTIVARIATE parents, "on" resolves PER ENVIRONMENT to the
@@ -536,27 +560,32 @@ export class LdResourceWriter {
     const envs = Object.entries(child.data.environments ?? {});
     if (envs.length === 0) throw new Error(`flag '${childKey}' reports no environments`);
 
-    const applied: string[] = [];
+    const armed: string[] = [];
+    const dark: string[] = [];
     const failed: string[] = [];
     for (const [env, cfg] of envs) {
       const hasPrereq = (cfg?.prerequisites ?? []).some((p) => p?.key === parentKey);
       const isOn = cfg?.on === true;
-      if (hasPrereq && isOn) {
-        applied.push(env); // already wired (PR re-run)
+      let parentVarId: string;
+      try {
+        parentVarId = resolveParentVariationId(parent.data, parentKey, env, variation);
+      } catch (e) {
+        failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
         continue;
       }
+      // ARM (turn the child on serving treatment behind the parent) ONLY while
+      // the prerequisite is UNMET — that is what makes wiring a no-op for users
+      // and the parent's release the child's release. If the parent ALREADY
+      // serves the required variation, arming would put the child live the
+      // moment its code deploys (re-coupling deploy with release): attach the
+      // prerequisite as a structural constraint and leave the child dark for
+      // its own normal release.
+      const met = servedParentVariationId(parent.data, env) === parentVarId;
       const instructions: Array<Record<string, unknown>> = [];
       if (!hasPrereq) {
-        let parentVarId: string;
-        try {
-          parentVarId = resolveParentVariationId(parent.data, parentKey, env, variation);
-        } catch (e) {
-          failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
-          continue;
-        }
         instructions.push({ kind: "addPrerequisite", key: parentKey, variationId: parentVarId });
       }
-      if (!isOn) {
+      if (!met && !isOn) {
         // Same instruction pair Beacon's prerequisite release uses: on +
         // fallthrough=treatment. The unmet prerequisite keeps users on control.
         instructions.push(
@@ -564,26 +593,41 @@ export class LdResourceWriter {
           { kind: "updateFallthroughVariationOrRollout", variationId: treatment._id },
         );
       }
+      if (instructions.length === 0) {
+        (met && !isOn ? dark : armed).push(env); // already wired (PR re-run)
+        continue;
+      }
       try {
         await this.ld.patchFlagSemantic(
           childKey,
           env,
           instructions,
-          `AutoFactory: on behind prerequisite ${parentKey}=${variation} (cross-repo release coordination)`,
+          met
+            ? `AutoFactory: prerequisite ${parentKey}=${variation} attached (parent already released — flag stays dark for its own release)`
+            : `AutoFactory: on behind prerequisite ${parentKey}=${variation} (cross-repo release coordination)`,
         );
-        applied.push(env);
+        (met && !isOn ? dark : armed).push(env);
       } catch (e) {
         failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    if (applied.length === 0) {
+    const applied = armed.length + dark.length;
+    if (applied === 0) {
       throw new Error(`prerequisite '${parentKey}' could not be applied to any environment (${failed.join("; ")})`);
     }
     const failNote = failed.length ? ` (failed in ${failed.join("; ")})` : "";
-    return (
-      `Prerequisite wired in ${applied.length} environment(s) (${applied.join(", ")}): ` +
-      `'${childKey}' is ON serving treatment behind '${parentKey}'=${variation} — users get control until the parent releases, then this flag goes live with it.${failNote}`
-    );
+    const parts: string[] = [];
+    if (armed.length) {
+      parts.push(
+        `armed in ${armed.join(", ")}: '${childKey}' is ON serving treatment behind '${parentKey}'=${variation} — users get control until the parent releases, then this flag goes live with it`,
+      );
+    }
+    if (dark.length) {
+      parts.push(
+        `attached in ${dark.join(", ")}: '${parentKey}' already serves the required variation there, so '${childKey}' stays DARK and releases through the normal flow, structurally gated by the prerequisite`,
+      );
+    }
+    return `Prerequisite wired in ${applied} environment(s) — ${parts.join("; ")}.${failNote}`;
   }
 
   /** Idempotent: turn on client-side ID availability for an existing flag. */

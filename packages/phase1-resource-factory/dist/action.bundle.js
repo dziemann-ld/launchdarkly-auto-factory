@@ -36304,6 +36304,20 @@ function variationReleased(state, variationValue) {
 function dedupe(values) {
   return [...new Set(values.filter(Boolean))];
 }
+function servedParentVariationId(parent, env) {
+  const vars = parent.variations ?? [];
+  const byIndex = (idx) => idx === void 0 ? void 0 : vars[idx]?._id;
+  const cfg = parent.environments?.[env];
+  if (!cfg)
+    return void 0;
+  if (cfg.on !== true)
+    return byIndex(cfg.offVariation) ?? byIndex(parent.defaults?.offVariation);
+  const single = byIndex(cfg.fallthrough?.variation);
+  if (single)
+    return single;
+  const arms = [...cfg.fallthrough?.rollout?.variations ?? []].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+  return byIndex(arms[0]?.variation) ?? byIndex(parent.defaults?.onVariation);
+}
 function resolveParentVariationId(parent, parentKey, env, variation) {
   const vars = parent.variations ?? [];
   const isBoolean = vars.some((v) => typeof v.value === "boolean");
@@ -36544,11 +36558,17 @@ var LdResourceWriter = class {
    * (beacon/src/trigger.ts), applied at creation time: attach the
    * prerequisite, turn the child ON, and point its fallthrough at treatment.
    *
-   * SAFE ON AN OFF PARENT BY LD SEMANTICS: while the parent serves a
-   * variation other than the required one, LaunchDarkly serves the child's
-   * OFF variation (control) to every context, even though the child is on.
-   * So wiring changes nothing for users; when the parent releases, the child
-   * goes live in lockstep with it — release coordination is structural.
+   * TWO MODES, decided per environment by whether the prerequisite is MET:
+   *  - UNMET (parent doesn't serve the required variation yet): attach the
+   *    prerequisite AND turn the child on serving treatment behind it. Safe by
+   *    LD semantics — while the parent serves another variation, LaunchDarkly
+   *    serves the child's OFF variation (control) to everyone — and it makes
+   *    the parent's release the child's release, in lockstep.
+   *  - MET (parent already serves it — e.g. iterating on a RELEASED feature):
+   *    attach the prerequisite only and leave the child DARK. Arming here
+   *    would put the child live the moment its code deploys (re-coupling
+   *    deploy with release); instead it releases through its own normal flow,
+   *    structurally gated by the prerequisite.
    *
    * `variation` names the parent variation to pin: "on"/"off" for boolean
    * parents; for MULTIVARIATE parents, "on" resolves PER ENVIRONMENT to the
@@ -36580,41 +36600,51 @@ var LdResourceWriter = class {
     const envs = Object.entries(child.data.environments ?? {});
     if (envs.length === 0)
       throw new Error(`flag '${childKey}' reports no environments`);
-    const applied = [];
+    const armed = [];
+    const dark = [];
     const failed = [];
     for (const [env, cfg] of envs) {
       const hasPrereq = (cfg?.prerequisites ?? []).some((p) => p?.key === parentKey);
       const isOn = cfg?.on === true;
-      if (hasPrereq && isOn) {
-        applied.push(env);
+      let parentVarId;
+      try {
+        parentVarId = resolveParentVariationId(parent.data, parentKey, env, variation);
+      } catch (e) {
+        failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
         continue;
       }
+      const met = servedParentVariationId(parent.data, env) === parentVarId;
       const instructions = [];
       if (!hasPrereq) {
-        let parentVarId;
-        try {
-          parentVarId = resolveParentVariationId(parent.data, parentKey, env, variation);
-        } catch (e) {
-          failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
-          continue;
-        }
         instructions.push({ kind: "addPrerequisite", key: parentKey, variationId: parentVarId });
       }
-      if (!isOn) {
+      if (!met && !isOn) {
         instructions.push({ kind: "turnFlagOn" }, { kind: "updateFallthroughVariationOrRollout", variationId: treatment._id });
       }
+      if (instructions.length === 0) {
+        (met && !isOn ? dark : armed).push(env);
+        continue;
+      }
       try {
-        await this.ld.patchFlagSemantic(childKey, env, instructions, `AutoFactory: on behind prerequisite ${parentKey}=${variation} (cross-repo release coordination)`);
-        applied.push(env);
+        await this.ld.patchFlagSemantic(childKey, env, instructions, met ? `AutoFactory: prerequisite ${parentKey}=${variation} attached (parent already released \u2014 flag stays dark for its own release)` : `AutoFactory: on behind prerequisite ${parentKey}=${variation} (cross-repo release coordination)`);
+        (met && !isOn ? dark : armed).push(env);
       } catch (e) {
         failed.push(`${env}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    if (applied.length === 0) {
+    const applied = armed.length + dark.length;
+    if (applied === 0) {
       throw new Error(`prerequisite '${parentKey}' could not be applied to any environment (${failed.join("; ")})`);
     }
     const failNote = failed.length ? ` (failed in ${failed.join("; ")})` : "";
-    return `Prerequisite wired in ${applied.length} environment(s) (${applied.join(", ")}): '${childKey}' is ON serving treatment behind '${parentKey}'=${variation} \u2014 users get control until the parent releases, then this flag goes live with it.${failNote}`;
+    const parts = [];
+    if (armed.length) {
+      parts.push(`armed in ${armed.join(", ")}: '${childKey}' is ON serving treatment behind '${parentKey}'=${variation} \u2014 users get control until the parent releases, then this flag goes live with it`);
+    }
+    if (dark.length) {
+      parts.push(`attached in ${dark.join(", ")}: '${parentKey}' already serves the required variation there, so '${childKey}' stays DARK and releases through the normal flow, structurally gated by the prerequisite`);
+    }
+    return `Prerequisite wired in ${applied} environment(s) \u2014 ${parts.join("; ")}.${failNote}`;
   }
   /** Idempotent: turn on client-side ID availability for an existing flag. */
   async ensureClientSideAvailability(flagKey) {
@@ -36758,7 +36788,7 @@ var CREATE_FLAG_TOOL = {
       tags: { type: "array", items: { type: "string" }, description: "Extra tags (auto-factory tags are added automatically)" },
       prerequisite: {
         type: "object",
-        description: "OPTIONAL flag dependency (cross-repo release coordination, and the iteration path for LEGACY BOOLEAN parents). In every environment this attaches the parent as a LaunchDarkly prerequisite AND turns this flag ON serving treatment behind it. SAFE while the parent is off: LaunchDarkly serves this flag's OFF variation (control) to everyone until the parent serves the required variation \u2014 nothing changes at wire time; when the parent releases, this feature goes live in lockstep. Pass it whenever the research brief names an exact parent flag key: the parent is looked up in the SAME LaunchDarkly project you create flags in (a different REPO does not mean a different project \u2014 estates commonly share one app project). If the parent isn't found, flag creation still succeeds and the failure is reported back to you \u2014 record it in the manifest and your brief.",
+        description: "OPTIONAL flag dependency (cross-repo release coordination, and the iteration path for LEGACY BOOLEAN parents). Per environment this attaches the parent as a LaunchDarkly prerequisite; while the prerequisite is UNMET (parent not yet serving the required variation) it ALSO turns this flag ON serving treatment behind it \u2014 safe: users get this flag's OFF variation (control) until the parent releases, then this feature goes live in lockstep. If the parent ALREADY serves the required variation (iterating on a released feature), the flag stays DARK with the prerequisite attached and releases through the normal flow \u2014 never live at deploy time. Pass it whenever the research brief names an exact parent flag key: the parent is looked up in the SAME LaunchDarkly project you create flags in (a different REPO does not mean a different project \u2014 estates commonly share one app project). If the parent isn't found, flag creation still succeeds and the failure is reported back to you \u2014 record it in the manifest and your brief.",
         properties: {
           flagKey: { type: "string", description: "The parent flag key this flag depends on." },
           variation: {

@@ -100,6 +100,57 @@ describe("addPrerequisite: on-behind-parent wiring", () => {
       /parent flag 'parent-flag' not found in project 'app-proj'/,
     );
   });
+
+  it("a MET prerequisite (parent already released) attaches WITHOUT arming — the child stays dark", async () => {
+    // Iterating on a released feature: arming would put the child live the
+    // moment its code deploys, re-coupling deploy with release.
+    const patches: Patch[] = [];
+    const ld = {
+      projectKey: "app-proj",
+      getFlag: async (flagKey: string) => {
+        if (flagKey === "parent-flag") {
+          return {
+            status: 200,
+            ok: true,
+            data: {
+              variations: [
+                { _id: "pv-true", value: true },
+                { _id: "pv-false", value: false },
+              ],
+              environments: {
+                production: { on: true, fallthrough: { variation: 0 }, offVariation: 1 }, // serving true
+                test: { on: false, offVariation: 1 }, // dark here
+              },
+            },
+          };
+        }
+        return {
+          status: 200,
+          ok: true,
+          data: {
+            variations: [
+              { _id: "cv-true", value: true },
+              { _id: "cv-false", value: false },
+            ],
+            environments: { production: {}, test: {} },
+          },
+        };
+      },
+      patchFlagSemantic: async (flagKey: string, env: string, instructions: Array<Record<string, unknown>>) => {
+        patches.push({ flagKey, env, instructions });
+        return { status: 200, ok: true, data: {} };
+      },
+    } as unknown as LdClient;
+
+    const note = await new LdResourceWriter(ld).addPrerequisite("child-flag", "parent-flag", "on");
+    const byEnv = Object.fromEntries(patches.map((p) => [p.env, p.instructions.map((i) => i.kind)]));
+    // production: prereq met → attach only, NO turnFlagOn.
+    assert.deepEqual(byEnv.production, ["addPrerequisite"]);
+    // test: parent dark → unmet → full on-behind-parent arming.
+    assert.deepEqual(byEnv.test, ["addPrerequisite", "turnFlagOn", "updateFallthroughVariationOrRollout"]);
+    assert.match(note, /stays DARK/);
+    assert.match(note, /armed in test/);
+  });
 });
 
 describe("addPrerequisite: multivariate parents and children", () => {

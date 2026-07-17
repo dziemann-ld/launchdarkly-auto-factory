@@ -51,7 +51,12 @@ never take another variation.
    variation release completes, Beacon re-points `auto-factory`-tagged children to the
    variation now served; human-built dependencies are surfaced, never rewritten.
    At wire time, prerequisites on multivariate parents pin what the parent's
-   targeting points at per environment ("on"), or an explicit value.
+   targeting points at per environment ("on"), or an explicit value — and the
+   child is armed on-behind-parent **only while the prerequisite is unmet**
+   (that's what makes the parent's release the child's release). When the
+   parent already serves the required variation (iterating on a released
+   feature), the prerequisite attaches but the child stays dark for its own
+   release — arming there would put it live the moment its code deploys.
 
 ## Consequences
 
