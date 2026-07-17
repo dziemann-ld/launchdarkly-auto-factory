@@ -144,6 +144,70 @@ describe("routing contract: PR-shape fixtures (walk → interpret → decide)", 
 });
 
 // ---------------------------------------------------------------------------
+describe("routing contract: deterministic handoff shims halt the walk", () => {
+  it("a failed verification stops downstream nodes and reports the failure", async () => {
+    const verifier = async (run: { configKey: string; tags: Record<string, string> }) =>
+      run.tags.flag_ready === "true"
+        ? {
+            node: run.configKey,
+            ok: false,
+            passed: [],
+            failures: [{ name: "flag-wired-in-code", detail: "'enable-x' is not referenced anywhere in the code" }],
+          }
+        : null;
+    const w = await walkGraph(
+      buildChain(),
+      new FakeRunner({
+        [KEYS.research]: { tags: { flag_worthy: "true" } },
+        [KEYS.flag]: { tags: { flag_ready: "true", flag_key: "enable-x" } },
+      }),
+      { PR_NUMBER: "1" },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      verifier,
+    );
+    assert.deepEqual(path(w), [KEYS.research, KEYS.flag]); // halted at the implementer
+    assert.equal(w.verificationFailed?.node, KEYS.flag);
+    assert.match(w.verificationFailed?.failures[0]?.detail ?? "", /not referenced/);
+    // Downstream never ran.
+    assert.ok(w.skipped.includes(KEYS.metrics));
+  });
+
+  it("a passing verification lets the chain continue; a shim crash never halts", async () => {
+    let crashed = 0;
+    const verifier = async (run: { configKey: string; tags: Record<string, string> }) => {
+      if (run.configKey === KEYS.metrics) {
+        crashed++;
+        throw new Error("shim bug");
+      }
+      return run.tags.flag_ready === "true"
+        ? { node: run.configKey, ok: true, passed: [{ name: "flag-wired-in-code", detail: "ok" }], failures: [] }
+        : null;
+    };
+    const w = await walkGraph(
+      buildChain(),
+      new FakeRunner({
+        [KEYS.research]: { tags: { flag_worthy: "true" } },
+        [KEYS.flag]: { tags: { flag_ready: "true", flag_created: "true" } },
+        [KEYS.metrics]: { tags: { needs_tests: "true" } },
+        [KEYS.review]: { tags: { review_approved: "approve", risk_level: "low" } },
+      }),
+      { PR_NUMBER: "1" },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      verifier,
+    );
+    assert.deepEqual(path(w), [KEYS.research, KEYS.flag, KEYS.metrics, KEYS.test, KEYS.review]);
+    assert.equal(w.verificationFailed, undefined);
+    assert.equal(crashed, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe("routing contract: registry ⟷ runtime + graph consistency", () => {
   const registry = readJson("config/agentcontrol/tags.json").tags as Record<string, unknown>;
   const registryKeys = new Set(Object.keys(registry));

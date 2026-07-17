@@ -39,7 +39,7 @@ const README = "config/agentcontrol/README.md";
  * flag_key/flag_variation; create_metric → metrics_created/metric_keys).
  * A registry tag declared `production: "tool"` must be one of these.
  */
-const TOOL_AUTO_TAGS = new Set(["flag_created", "flag_ready", "flag_key", "flag_variation", "metrics_created", "metric_keys"]);
+const TOOL_AUTO_TAGS = new Set(["flag_created", "flag_ready", "flag_key", "flag_variation", "metrics_created", "metric_keys", "metric_event_keys", "tests_last_run"]);
 
 function listJson(dir) {
   try {

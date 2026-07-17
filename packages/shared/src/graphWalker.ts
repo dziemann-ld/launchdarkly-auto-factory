@@ -20,6 +20,7 @@
 
 import type { AgentGraphDefinition, AgentGraphNode, LDGraphTracker } from "@launchdarkly/server-sdk-ai";
 import type { AgentNodeResult, AgentRunner } from "./agentRunner.js";
+import type { HandoffVerification, HandoffVerifier } from "./handoffVerifier.js";
 import type { JudgeHook } from "./judges.js";
 
 export interface NodeRun {
@@ -73,6 +74,13 @@ export interface WalkResult {
    * broken. Undefined when no gate halted the walk.
    */
   pendingApproval?: { node: string };
+  /**
+   * Set when a deterministic handoff shim (see handoffVerifier.ts) FAILED
+   * after a node: a claim the node handed off could not be re-derived from
+   * primary evidence (LaunchDarkly state / the checkout). The chain halts at
+   * that node — downstream agents must not build on an unverified claim.
+   */
+  verificationFailed?: HandoffVerification;
 }
 
 /**
@@ -103,6 +111,7 @@ export interface GateController {
 export type WalkEvent =
   | { type: "node-start"; configKey: string; index: number }
   | { type: "node-complete"; configKey: string; index: number; run: NodeRun }
+  | { type: "node-verified"; verification: HandoffVerification }
   | { type: "stalled"; stall: StallInfo }
   | { type: "awaiting-approval"; node: string };
 
@@ -180,6 +189,13 @@ export async function walkGraph(
    * scores on the node's tracker. Judge failures never fail the walk.
    */
   judgeHook?: JudgeHook,
+  /**
+   * Optional deterministic handoff shims (see handoffVerifier.ts): after each
+   * node completes, re-derive the claims its tags assert from primary evidence
+   * (LaunchDarkly + the checkout). A failed verification HALTS the walk
+   * (WalkResult.verificationFailed) — unlike judges, these are gates.
+   */
+  verifier?: HandoffVerifier,
 ): Promise<WalkResult> {
   const runs: NodeRun[] = [];
   const accumulatedTags: Record<string, string> = {};
@@ -192,6 +208,7 @@ export async function walkGraph(
   let inboundHandoff: Record<string, unknown> | undefined;
   let stalledAt: StallInfo | undefined;
   let pendingApproval: { node: string } | undefined;
+  let verificationFailed: HandoffVerification | undefined;
 
   while (node && !visited.has(node.getKey())) {
     const key = node.getKey();
@@ -248,6 +265,28 @@ export async function walkGraph(
       }
     }
 
+    // Deterministic handoff shim: re-derive this node's claims from primary
+    // evidence. A FAILED check halts the walk — downstream agents must not
+    // build on an unverified claim. (A shim implementation bug — an unexpected
+    // throw — logs and does not halt; evidential failures are reported inside
+    // the verification, not thrown.)
+    if (verifier) {
+      try {
+        const verification = await verifier({ configKey: key, tags: result.tags });
+        if (verification) {
+          onEvent?.({ type: "node-verified", verification });
+          for (const c of verification.passed) console.log(`[verify] ${key} ✓ ${c.name}: ${c.detail}`);
+          for (const c of verification.failures) console.error(`[verify] ${key} ✗ ${c.name}: ${c.detail}`);
+          if (!verification.ok) {
+            verificationFailed = verification;
+            break;
+          }
+        }
+      } catch (e) {
+        console.warn(`[verify] shim errored for '${key}' (non-fatal): ${e instanceof Error ? e.message : e}`);
+      }
+    }
+
     // Pick the next edge whose handoff conditions pass.
     let next: string | null = null;
     let nextHandoff: Record<string, unknown> | undefined;
@@ -301,5 +340,6 @@ export async function walkGraph(
     skipped,
     ...(stalledAt ? { stalledAt } : {}),
     ...(pendingApproval ? { pendingApproval } : {}),
+    ...(verificationFailed ? { verificationFailed } : {}),
   };
 }

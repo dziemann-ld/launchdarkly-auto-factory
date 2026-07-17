@@ -15,6 +15,32 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-07-17 (later)
+
+### ✅ Deterministic handoff shims: agent claims re-derived from primary evidence
+- **Motivation (live run a):** the implementer wired a multivariate flag through a
+  boolean helper — every tool-owned tag was TRUE (flag existed, variation existed)
+  yet the wiring was wrong, and the LLM reviewer approved it. Tool-owned tags prove a
+  side effect happened; nothing connected the claim to the diff.
+- **New layer (`handoffVerifier.ts`, wired into the walker for every provider/front
+  end):** after each node, mechanical checks re-derive its claims — no model:
+  `flag_ready` → the flag AND claimed variation exist in LaunchDarkly (fresh read),
+  the flag key is referenced in the code (manifests don't count), and the vN
+  variation appears QUOTED in a file referencing the key (catches the
+  boolean-helper shape exactly); `metric_event_keys` (new tool-owned tag from
+  create_metric) → every event-backed metric has an emitter in the checkout;
+  `tests_last_run` (new tool-owned tag from run_tests) → handing off with a red
+  suite fails. A failed shim HALTS the chain (WalkResult.verificationFailed), fails
+  the GitHub check with the mechanical finding, and shows in the PR comment; a shim
+  implementation crash logs and never halts (evidential failures are reported, not
+  thrown).
+- **Docs:** docs/pipeline-overview.html now renders the shims as ⛊ badges BETWEEN
+  the agent nodes (six: brief-verified, intent-fail-closed, flag-verified,
+  metrics-verified, tests-executed, verdict-read-mechanically), and the Phase 1/2
+  node content was refreshed for ADR 0013 (multivariate actions, variation
+  releases, rollback-to-vN-1, prerequisite re-pointing). Registry/README gained
+  `metric_event_keys` + `tests_last_run`. No LD config change — code + docs only.
+
 ## 2026-07-17
 
 ### ✅ Multivariate flags + iteration-aware flagging (fixes the flag_created stall; ADR 0013)

@@ -19,6 +19,7 @@
     --reason: #79c0ff;    /* Sonnet — reasoning/judgment agents */
     --cursor: #bc8cff;    /* Cursor Composer — coding agents (A/B vs Sonnet) */
     --judge: #d29922;     /* LaunchDarkly judges — sampled quality evaluation */
+    --shim: #39c5cf;      /* deterministic shims — mechanical checks between agents */
   }
   * { box-sizing: border-box; }
   body {
@@ -67,6 +68,20 @@
 
   .arrow { align-self: center; color: var(--muted); font-size: 1.1rem; padding: 0 .1rem; user-select: none; }
 
+  /* Deterministic shims: mechanical checks BETWEEN agents. Unlike judges
+     (advisory) these are gates — a failed shim halts the chain. */
+  .shim {
+    position: relative; flex: 0 0 auto; align-self: center;
+    width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+    background: #0f1d1e; border: 1px solid #1f6f6a; border-radius: 9px;
+    color: var(--shim); cursor: help; font-size: 1rem; user-select: none;
+    transition: border-color .15s, transform .15s;
+  }
+  .shim:hover { border-color: var(--shim); transform: translateY(-2px); z-index: 100; }
+  .shim .tip { width: 330px; }
+  .shim .tip .k { color: var(--shim); }
+  .shim .tip b { color: var(--shim); }
+
   /* Tooltips */
   .tip {
     visibility: hidden; opacity: 0; transition: opacity .15s ease .05s;
@@ -81,7 +96,7 @@
     width: 10px; height: 10px; background: var(--tip-bg);
     border-left: 1px solid var(--node-border); border-top: 1px solid var(--node-border);
   }
-  .node:hover .tip { visibility: visible; opacity: 1; }
+  .node:hover .tip, .shim:hover .tip { visibility: visible; opacity: 1; }
   .flow .node:nth-child(-n+3) .tip { left: 0; transform: none; }
   .flow .node:nth-child(-n+3) .tip::before { left: 36px; }
   .tip ul { margin: .35rem 0 0; padding-left: 1.05rem; }
@@ -155,10 +170,16 @@
         <ul>
           <li>Classifies <span class="k">pr_type</span>, <span class="k">risk_level</span>, <span class="k">change_scope</span>, <span class="k">change_patterns</span>, user-facing impact.</li>
           <li>Records the repo's existing flag, test, and telemetry patterns; downstream agents match them.</li>
+          <li>Flag landscape research (<span class="k">get_flag_state</span>): for every flag already gating touched code, reads its kind, variation lineage (control/v1/v2&hellip;), and per-environment RELEASED-ness — then decides the <span class="k">flag_action</span>: <span class="k">create</span> | <span class="k">ride_existing</span> (unreleased variation — amend it) | <span class="k">extend_variation</span> (released — mint vN+1) | <span class="k">child_flag</span> (net-new inside flagged code, or a released legacy boolean) | <span class="k">none</span>.</li>
           <li>Creates the release manifest <span class="k">.release-flags/pr-N.json</span> via <span class="k">write_manifest</span>, including the human-editable <span class="k">releaseIntent</span> skeleton — so an approver at a gate has a form to fill in BEFORE implementation.</li>
           <li>Routing: tags <span class="k">flag_worthy</span> and a numeric <span class="k">risk_score</span> (0–1, consumed by the risk-threshold approval mode). Tagging <span class="k">skip_flagging=true</span> ends the chain (config-only, docs, dependency PRs).</li>
           <li>When the knowledge graph is on, it also gets <span class="k">query_dependencies</span>: a no-argument call returns this PR's blast radius (changed services, dependent services with evidence, upstream contracts, flags already wrapping the changed code). Graph <span class="k">gaps</span> are reported as UNKNOWN coverage, never as low risk — a thin graph can't launder a risky change.</li>
         </ul></div>
+    </div>
+    <div class="arrow">→</div>
+
+<div class="shim">⛊
+      <div class="tip"><b>Brief verified</b> — deterministic shim (no model): the release manifest is written only through <span class="k">write_manifest</span>, which validates machine fields mechanically (real flag keys in <span class="k">prerequisites</span>, vN-only <span class="k">targetVariation</span>) and rejects prose; required routing tags (<span class="k">flag_worthy</span>, <span class="k">flag_action</span>, <span class="k">risk_score</span>) are FORCED if the agent forgets — risk gates fail closed without them.</div>
     </div>
     <div class="arrow">→</div>
 
@@ -178,19 +199,31 @@
     </div>
     <div class="arrow">→</div>
 
+<div class="shim">⛊
+      <div class="tip"><b>Intent fail-closed</b> — deterministic shim (no model): a deterministic normalizer re-parses <span class="k">releaseIntent</span> on every read (here and again in Beacon at deploy time): unknown actions, unparseable dates, or a malformed block fail CLOSED to <span class="k">hold</span> — an unintelligible human intent can never be read as &ldquo;release it&rdquo;.</div>
+    </div>
+    <div class="arrow">→</div>
+
     <div class="node">
       <div class="step">Step 5</div>
       <div class="title">Flag Implementer</div>
       <div class="hint">creates the flag, wires the code</div>
       <div class="model ab">Composer ⇄ Sonnet (A/B)</div><div class="model judged">⚖ judged</div>
-      <div class="tip">
+      <div class="tip">Executes the research planner's <span class="k">flag_action</span> — it does not re-decide.
         <ul>
-          <li>Creates a boolean flag via the API with targeting off in all environments.</li>
-          <li>Wraps the new behavior in flag evaluation. The control path (flag off) keeps prior behavior.</li>
-          <li>Corrects the manifest's <span class="k">flagKey</span> via <span class="k">write_manifest</span> if the created flag differs from research's suggestion (the intent block is preserved).</li>
-          <li>Commits to the PR branch. Re-runs are idempotent: flag creation returns 409 and the existing flag is reused.</li>
+          <li><span class="k">create</span>/<span class="k">child_flag</span>: creates a STRING MULTIVARIATE flag (<span class="k">control</span> + <span class="k">v1</span>, targeting off everywhere; never boolean — only multivariate flags can take iteration variations later). Child flags attach the parent as a prerequisite: armed on-behind-parent while the prerequisite is unmet, left dark when the parent already serves it.</li>
+          <li><span class="k">extend_variation</span>: appends <span class="k">vN</span> to the existing flag (<span class="k">add_variation</span>) and wires the PR's changes under it — dark until released; the previous variation's path stays intact.</li>
+          <li><span class="k">ride_existing</span>: no LaunchDarkly change — <span class="k">use_existing_flag</span> VERIFIES the ridden variation is genuinely unreleased (refuses live ones) so the chain can advance honestly.</li>
+          <li>Wires string comparisons with fail-safe default <span class="k">'control'</span>. The control path keeps prior behavior exactly.</li>
+          <li>Corrects the manifest's <span class="k">flagKey</span>/<span class="k">targetVariation</span> via <span class="k">write_manifest</span> (the intent block is preserved).</li>
+          <li>Commits to the PR branch. Re-runs are idempotent: 409s reuse the flag; <span class="k">add_variation</span> reuses the intended value.</li>
           <li>An attached LaunchDarkly judge (<span class="k">implementation-quality</span>) then scores the output 0..1 against the agent's actual git diff (pipeline-gathered evidence, not the agent's claims). Non-blocking; scores record per-variation for the model A/B.</li>
         </ul></div>
+    </div>
+    <div class="arrow">→</div>
+
+<div class="shim">⛊
+      <div class="tip"><b>Flag verified</b> — deterministic shim (no model): the chain advances only on the tool-owned <span class="k">flag_ready</span> tag — set by the flag tools from the actual LaunchDarkly API response and STRIPPED from any agent claim. The handoff shim then re-derives the claim from primary evidence: the flag and its claimed variation exist in LaunchDarkly (fresh read), the flag key is referenced in the code, and the vN variation is compared (quoted) in a file evaluating it — a multivariate flag wired through a boolean helper fails here mechanically. Any failed check halts the chain.</div>
     </div>
     <div class="arrow">→</div>
 
@@ -213,6 +246,11 @@
     </div>
     <div class="arrow">→</div>
 
+<div class="shim">⛊
+      <div class="tip"><b>Metrics verified</b> — deterministic shim (no model): metric tags (<span class="k">metrics_created</span>, <span class="k">metric_keys</span>, <span class="k">metric_event_keys</span>) are tool-owned — they derive from LaunchDarkly API responses. The shim then greps the checkout for an EMITTER of every event-backed metric&rsquo;s event key: a metric that exists in LaunchDarkly but that nothing in the code emits fails the run — no silent no-op guardrails.</div>
+    </div>
+    <div class="arrow">→</div>
+
     <div class="node">
       <div class="step">Step 7</div>
       <div class="title">Flag Testing</div>
@@ -220,10 +258,15 @@
       <div class="model ab">Composer ⇄ Sonnet (A/B)</div>
       <div class="tip">
         <ul>
-          <li>Writes paired tests per flagged path: flag on asserts the new behavior, flag off asserts the prior behavior.</li>
+          <li>Writes variation-path tests per flagged path: the PR's variation asserts the new behavior, <span class="k">control</span> asserts the prior behavior — and on an extend_variation PR, vN-1 keeps ITS behavior too (three-way coverage).</li>
           <li>Uses the repo's existing test framework and conventions.</li>
           <li>Executes the suite (<span class="k">run_tests</span>) and fixes failures before committing.</li>
         </ul></div>
+    </div>
+    <div class="arrow">→</div>
+
+<div class="shim">⛊
+      <div class="tip"><b>Tests executed</b> — deterministic shim (no model): <span class="k">run_tests</span> executes the suite for real (deps installed, pytest/npm/go), and the tool records the LAST run&rsquo;s outcome as the tool-owned <span class="k">tests_last_run</span> tag. Handing off with a red suite fails the run mechanically — &ldquo;the tests pass&rdquo; is an execution result, never an agent claim.</div>
     </div>
     <div class="arrow">→</div>
 
@@ -238,6 +281,11 @@
           <li>Validates instrumentation: <span class="k">track()</span> event names are checked against each metric's <span class="k">event_key</span>, not against metric keys.</li>
           <li>Tags <span class="k">review_approved</span> and <span class="k">risk_level</span> — the at-a-glance verdict on the PR (a rejection fails the check run). Human approval itself happens earlier, at the pre-execution gates.</li>
         </ul></div>
+    </div>
+    <div class="arrow">→</div>
+
+<div class="shim">⛊
+      <div class="tip"><b>Verdict read mechanically</b> — deterministic shim (no model): the check-run verdict is computed from tags alone (<span class="k">interpretWalk</span>): tool-owned tags can&rsquo;t be faked, a missing reviewer verdict reads as INCOMPLETE (never as approval), a chain stall or failed shim is reported as exactly that, and the GitHub check goes green only on an approved (or verified no-op) walk.</div>
     </div>
     <div class="arrow">→</div>
 
@@ -320,8 +368,10 @@
           <li>Then method precedence: manifest <span class="k">releasePlan.releaseMethod</span> (legacy <span class="k">releaseOverrides</span> still read), then the flag's configured release policy, else guarded when <span class="k">metricKeys</span> exist, progressive otherwise.</li>
           <li>Stage precedence: overrides, then policy, then defaults (guarded 20%/50%, progressive 20/50/100%).</li>
           <li>Guarded stage allocations are limited to 50% by the API; the release serves 100% after the final stage completes.</li>
-          <li>Flags are off at this point, so the semantic patch combines <span class="k">turnFlagOn</span> and <span class="k">startAutomatedRelease</span> in one request.</li>
+          <li>Multivariate flags release a VARIATION: target = the manifest's <span class="k">targetVariation</span> (else the lineage tip), original = whatever the environment serves today — a first release moves control&rarr;v1; an iteration release moves v1&rarr;v2 on an already-on flag. Already serving the target is an explicit <span class="k">noop</span>.</li>
+          <li>Fresh flags are off, so the semantic patch combines <span class="k">turnFlagOn</span> and <span class="k">startAutomatedRelease</span> in one request.</li>
           <li>A flag with an in-progress release reports <span class="k">already_running</span> instead of re-triggering.</li>
+          <li>After a variation release completes, Beacon re-points auto-factory child flags whose prerequisite pins the parent's PREVIOUS variation (LD prerequisites pin a variationId; without this, releasing v2 would silently darken children pinned on v1). Hand-built dependencies are surfaced, never rewritten.</li>
         </ul></div>
     </div>
     <div class="arrow">→</div>
@@ -362,8 +412,10 @@
       <div class="title">Auto-rollback (LaunchDarkly)</div>
       <div class="hint">flag reverts to control, server-side</div>
       <div class="tip">LaunchDarkly's guarded release detects the killswitch metric
-        regression and reverts: traffic returns to the control variation by flag
-        change, with no deploy and no Beacon involvement. Beacon merely records the
+        regression and reverts: traffic returns to the ORIGINAL variation by flag
+        change — control on a first release, the previous vN-1 on an iteration
+        release (v2 regresses back to v1, not to off) — with no deploy and no
+        Beacon involvement. Beacon merely records the
         <span class="k">reverted</span> terminal state.</div>
     </div>
 
@@ -377,6 +429,7 @@
   <span><span class="dot" style="background:var(--reason)"></span>Sonnet — reasoning agents</span>
   <span><span class="dot" style="background:var(--cursor)"></span>Composer ⇄ Sonnet A/B — coding agents</span>
   <span><span class="dot" style="background:var(--judge)"></span>⚖ judged — a LaunchDarkly judge scores the output against the agent's actual diff (non-blocking; the reviewer remains the gate)</span>
+  <span><span class="dot" style="background:var(--shim)"></span>⛊ deterministic shim — a mechanical check between agents that re-derives the handoff's claims from LaunchDarkly and the checkout (no model; a failure halts the chain)</span>
 </div>
 
 </body>

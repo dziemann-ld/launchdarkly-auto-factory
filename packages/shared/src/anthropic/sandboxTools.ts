@@ -529,6 +529,8 @@ export const TOOL_OWNED_TAGS: ReadonlySet<string> = new Set([
   "flag_variation",
   "metrics_created",
   "metric_keys",
+  "metric_event_keys",
+  "tests_last_run",
 ]);
 
 /**
@@ -1059,6 +1061,13 @@ export class SandboxToolExecutor {
     const keys = this.tags.metric_keys ? this.tags.metric_keys.split(",").filter(Boolean) : [];
     if (!keys.includes(result.key)) keys.push(result.key);
     this.tags.metric_keys = keys.join(",");
+    // Event-backed metrics also record their event key — the deterministic
+    // handoff shim greps the code for an emitter of each one.
+    if (input.event_key) {
+      const events = this.tags.metric_event_keys ? this.tags.metric_event_keys.split(",").filter(Boolean) : [];
+      if (!events.includes(String(input.event_key))) events.push(String(input.event_key));
+      this.tags.metric_event_keys = events.join(",");
+    }
     return { content: result.detail };
   }
 
@@ -1306,6 +1315,16 @@ export class SandboxToolExecutor {
   /** Auto-detect the repo's test runner (pytest / npm / go), install deps, and run it. */
   private runTests(dir?: string): ToolExecResult {
     if (!this.allowEdits) return { content: "run_tests is not available", isError: true };
+    const result = this.runTestsInner(dir);
+    // Tool-owned fact for the deterministic handoff shim: the LAST real test
+    // execution's outcome. "no recognized test setup" is inconclusive, not a run.
+    if (!result.content.includes("no recognized test setup")) {
+      this.tags.tests_last_run = result.isError ? "fail" : "pass";
+    }
+    return result;
+  }
+
+  private runTestsInner(dir?: string): ToolExecResult {
     const cwd = dir ? this.safeResolve(dir) : this.root;
     const has = (f: string) => existsSync(resolve(cwd, f));
     let entries: string[] = [];

@@ -16,6 +16,7 @@ import {
   type AgentRunner,
   AnthropicAgentRunner,
   type AssembledGraph,
+  buildHandoffVerifier,
   CursorAgentRunner,
   KNOWLEDGE_GRAPH_FLAG_KEY,
   assembleKnowledgeGraph,
@@ -498,7 +499,13 @@ async function main(): Promise<void> {
       }
     : undefined;
 
-  const walk = await walkGraph(graphDef, runner, context, graphTracker, undefined, gate, judgeHook);
+  // Deterministic handoff shims: re-derive each node's claims from primary
+  // evidence (LaunchDarkly + the checkout). Same connection flag creation uses;
+  // without one the LD-side checks are skipped and code-side checks still run.
+  const verifierWriter = flagCreationWriter();
+  const verifier = buildHandoffVerifier({ sandboxRoot, ...(verifierWriter ? { writer: verifierWriter } : {}) });
+
+  const walk = await walkGraph(graphDef, runner, context, graphTracker, undefined, gate, judgeHook, verifier);
 
   // Per-node visibility: dump each agent's terminal status, routing tags, and final output.
   for (const r of walk.runs) {
@@ -517,6 +524,15 @@ async function main(): Promise<void> {
   // letting it surface only as a misleading verdict (issue #9 item #3).
   const stallText = walk.stalledAt ? describeStall(walk.stalledAt) : "";
   if (stallText) console.log(`::warning::AutoFactory: ${stallText}`);
+
+  // A deterministic handoff shim failed: a claim could not be re-derived from
+  // primary evidence. This is a mechanical finding, not a model judgment —
+  // surface it as an error annotation and fail the run below.
+  const verifyText = walk.verificationFailed
+    ? `deterministic check failed after '${walk.verificationFailed.node}': ` +
+      walk.verificationFailed.failures.map((f) => `[${f.name}] ${f.detail}`).join("; ")
+    : "";
+  if (verifyText) console.log(`::error::AutoFactory: ${verifyText}`);
 
   // Halted at an approval gate: report what's pending + how to approve, then
   // stop. The flag/code for the gated step have NOT been created. A re-run once
@@ -604,6 +620,7 @@ async function main(): Promise<void> {
       : "",
     walk.skipped.length ? `**Skipped:** ${walk.skipped.join(", ")}` : "",
     stallText ? `**⚠ Stalled:** ${stallText}` : "",
+    verifyText ? `**⛔ Deterministic check failed:** ${verifyText}` : "",
     "",
     "| Agent | Status | Judge | Tags |",
     "|---|---|---|---|",
@@ -620,16 +637,16 @@ async function main(): Promise<void> {
     name: "AutoFactory — Phase 1",
     repo: context.REPO,
     headSha: checkoutHeadSha(sandboxRoot) ?? context.HEAD_SHA,
-    conclusion: decision.apply || decision.noop ? "success" : "failure",
-    title: decision.reason,
+    conclusion: !walk.verificationFailed && (decision.apply || decision.noop) ? "success" : "failure",
+    title: walk.verificationFailed ? `Deterministic check failed after ${walk.verificationFailed.node}` : decision.reason,
     summary,
   });
 
   // Non-zero exit fails the PR check. Green: applied, human-approval pause, or a
-  // no-op (no flag needed). Red: a genuine rejection OR an incomplete run (the
-  // chain stalled / never reviewed) — both warrant attention, but they now carry
-  // distinct messages above rather than both reading "REJECTED".
-  if (!decision.apply && !decision.noop) process.exitCode = 1;
+  // no-op (no flag needed). Red: a genuine rejection, an incomplete run (the
+  // chain stalled / never reviewed), or a failed deterministic check — each
+  // carries its own distinct message above.
+  if (walk.verificationFailed || (!decision.apply && !decision.noop)) process.exitCode = 1;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

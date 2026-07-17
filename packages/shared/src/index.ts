@@ -11,6 +11,7 @@ export * from "./configVersion.js";
 // GitHub Action and the Cursor extension). Front ends supply the context and a
 // reporter; the walk + approval logic lives here.
 export * from "./graphWalker.js";
+export * from "./handoffVerifier.js";
 export * from "./approval.js";
 export * from "./approvalGates.js";
 export * from "./approvalPolicy.js";

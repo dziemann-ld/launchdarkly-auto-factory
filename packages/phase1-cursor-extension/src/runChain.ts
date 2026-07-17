@@ -16,6 +16,7 @@ import {
   LdClient,
   LdResourceWriter,
   appConnection,
+  buildHandoffVerifier,
   createPolicyGate,
   decideApproval,
   getLdSdk,
@@ -103,7 +104,11 @@ export async function runPhase1(opts: RunOptions): Promise<RunResult> {
     (event) => {
       if (event.type === "node-start") reporter.nodeStart(event.configKey);
       else if (event.type === "node-complete") reporter.nodeComplete(event.run);
-      else if (event.type === "stalled") {
+      else if (event.type === "node-verified") {
+        const v = event.verification;
+        if (v.ok) reporter.log(`⛊ deterministic checks passed after ${v.node} (${v.passed.map((c) => c.name).join(", ")})`);
+        else reporter.log(`⛔ deterministic check FAILED after ${v.node}: ${v.failures.map((c) => `[${c.name}] ${c.detail}`).join("; ")}`);
+      } else if (event.type === "stalled") {
         const u = event.stall.unmet
           .map((e) => `→ ${e.target} needs ${Object.entries(e.requireMissing).map(([k, v]) => `${k}=${v}`).join(", ")}`)
           .join("; ");
@@ -113,6 +118,10 @@ export async function runPhase1(opts: RunOptions): Promise<RunResult> {
       }
     },
     gate,
+    undefined,
+    // Deterministic handoff shims: LD-side checks need the writer's connection;
+    // read-only runs still get the code-side checks.
+    buildHandoffVerifier({ sandboxRoot: opts.workspaceRoot, ...(writer ? { writer } : {}) }),
   );
 
   const verdict = interpretWalk(walk.tags);

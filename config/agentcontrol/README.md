@@ -82,6 +82,8 @@ the registry, the graph, and the instructions all agree.
 | `review_approved` | code-reviewer | `"approve"`/`"approved"`/`"true"`: the change is approved |
 | `metrics_created` | metrics-author | `"true"` if any metric was created/reused (set automatically by `create_metric`) |
 | `metric_keys` | metrics-author | comma-separated metric keys attached (set automatically by `create_metric`) |
+| `metric_event_keys` | metrics-author | comma-separated event keys of event-backed metrics (set automatically by `create_metric`; the deterministic handoff shim greps the code for an emitter of each) |
+| `tests_last_run` | flag-testing | `pass`/`fail` — outcome of the last real `run_tests` execution (set automatically by `run_tests`; a `fail` at handoff mechanically fails the run) |
 | `risk_level` | code-reviewer | `low` / `medium` / `high`; categorical companion to `risk_score` (fallback mapping when the score is missing) |
 | `risk_score` | research-planner | numeric `0.0`–`1.0`; in `risk-threshold` approval mode, steps gate when it meets the `auto-factory-risk-threshold` flag (fail-closed when absent) |
 

@@ -33122,8 +33122,8 @@ var init_sdk = __esm({
 
 // src/action.ts
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync6, readFileSync as readFileSync7, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname5, join as join7, resolve as resolve7 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname5, join as join8, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ../shared/dist/env.js
@@ -33649,7 +33649,7 @@ function allNodeKeys(graphDef) {
   }
   return [...keys];
 }
-async function walkGraph(graphDef, runner, context, graphTracker, onEvent, gate, judgeHook) {
+async function walkGraph(graphDef, runner, context, graphTracker, onEvent, gate, judgeHook, verifier) {
   const runs = [];
   const accumulatedTags = {};
   const ctx = { ...context };
@@ -33659,6 +33659,7 @@ async function walkGraph(graphDef, runner, context, graphTracker, onEvent, gate,
   let inboundHandoff;
   let stalledAt;
   let pendingApproval;
+  let verificationFailed;
   while (node && !visited.has(node.getKey())) {
     const key = node.getKey();
     if (gate && gatedSteps.has(key) && !await gate.resolve(key, accumulatedTags)) {
@@ -33698,6 +33699,24 @@ async function walkGraph(graphDef, runner, context, graphTracker, onEvent, gate,
         await judgeHook({ configKey: key, cfg, input: prompt, output, tracker });
       } catch (e) {
         console.warn(`[judge] hook failed for '${key}' (non-fatal): ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    if (verifier) {
+      try {
+        const verification = await verifier({ configKey: key, tags: result.tags });
+        if (verification) {
+          onEvent?.({ type: "node-verified", verification });
+          for (const c of verification.passed)
+            console.log(`[verify] ${key} \u2713 ${c.name}: ${c.detail}`);
+          for (const c of verification.failures)
+            console.error(`[verify] ${key} \u2717 ${c.name}: ${c.detail}`);
+          if (!verification.ok) {
+            verificationFailed = verification;
+            break;
+          }
+        }
+      } catch (e) {
+        console.warn(`[verify] shim errored for '${key}' (non-fatal): ${e instanceof Error ? e.message : e}`);
       }
     }
     let next = null;
@@ -33749,7 +33768,113 @@ async function walkGraph(graphDef, runner, context, graphTracker, onEvent, gate,
     tags: accumulatedTags,
     skipped,
     ...stalledAt ? { stalledAt } : {},
-    ...pendingApproval ? { pendingApproval } : {}
+    ...pendingApproval ? { pendingApproval } : {},
+    ...verificationFailed ? { verificationFailed } : {}
+  };
+}
+
+// ../shared/dist/handoffVerifier.js
+import { readdirSync as readdirSync2, readFileSync as readFileSync3, statSync } from "node:fs";
+import { join as join2 } from "node:path";
+var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".venv", ".release-flags"]);
+var MAX_FILE_BYTES = 4e5;
+var VN_RE = /^v\d+$/;
+function filesContaining(root, needle) {
+  const hits = [];
+  const walk2 = (dir, rel) => {
+    let entries;
+    try {
+      entries = readdirSync2(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (SKIP_DIRS.has(name))
+        continue;
+      const abs = join2(dir, name);
+      const relPath = rel ? `${rel}/${name}` : name;
+      let st;
+      try {
+        st = statSync(abs);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        walk2(abs, relPath);
+      } else if (st.isFile() && st.size <= MAX_FILE_BYTES) {
+        try {
+          if (readFileSync3(abs, "utf8").includes(needle))
+            hits.push(relPath);
+        } catch {
+        }
+      }
+    }
+  };
+  walk2(root, "");
+  return hits;
+}
+function quotedOccurrence(content, value) {
+  for (const q of ["'", '"', "`"]) {
+    if (content.includes(`${q}${value}${q}`))
+      return true;
+  }
+  return false;
+}
+function buildHandoffVerifier(opts) {
+  return async (run) => {
+    const t = run.tags;
+    const passed = [];
+    const failures = [];
+    const check = (ok, name, okDetail, failDetail) => {
+      (ok ? passed : failures).push({ name, detail: ok ? okDetail : failDetail });
+    };
+    if (t.flag_ready === "true" && t.flag_key) {
+      const flagKey = t.flag_key;
+      const variation = t.flag_variation ?? "";
+      if (opts.writer) {
+        try {
+          const state = await opts.writer.getFlagState(flagKey);
+          check(state.exists, "flag-exists-in-ld", `'${flagKey}' exists in project '${opts.writer.projectKey}'`, `'${flagKey}' does NOT exist in project '${opts.writer.projectKey}' despite flag_ready`);
+          if (state.exists && variation) {
+            check(state.variations.some((v) => v.value === variation), "variation-exists-in-ld", `variation '${variation}' exists on '${flagKey}'`, `variation '${variation}' does NOT exist on '${flagKey}'`);
+          }
+        } catch (e) {
+          failures.push({
+            name: "flag-exists-in-ld",
+            detail: `could not verify '${flagKey}' in LaunchDarkly: ${e instanceof Error ? e.message : String(e)}`
+          });
+        }
+      }
+      const referencing = filesContaining(opts.sandboxRoot, flagKey);
+      check(referencing.length > 0, "flag-wired-in-code", `'${flagKey}' referenced in ${referencing.length} file(s) (${referencing.slice(0, 3).join(", ")})`, `'${flagKey}' is not referenced anywhere in the code \u2014 a flag that exists in LaunchDarkly but gates nothing`);
+      if (VN_RE.test(variation) && referencing.length > 0) {
+        const wired = referencing.some((rel) => {
+          try {
+            return quotedOccurrence(readFileSync3(join2(opts.sandboxRoot, rel), "utf8"), variation);
+          } catch {
+            return false;
+          }
+        });
+        check(wired, "variation-wired-in-code", `'${variation}' compared (quoted) alongside '${flagKey}'`, `'${variation}' never appears (quoted) in any file referencing '${flagKey}' \u2014 multivariate flag evaluated through a boolean helper? Every string variation is truthy, so the control path would be unreachable`);
+      }
+    }
+    if (t.metric_event_keys) {
+      for (const eventKey of t.metric_event_keys.split(",").filter(Boolean)) {
+        const emitters = filesContaining(opts.sandboxRoot, eventKey);
+        check(emitters.length > 0, "metric-event-instrumented", `event '${eventKey}' emitted in ${emitters.slice(0, 2).join(", ")}`, `metric event '${eventKey}' has no emitter in the code \u2014 the metric exists in LaunchDarkly but will never receive data`);
+      }
+    }
+    if (t.tests_last_run === "fail") {
+      failures.push({
+        name: "tests-green-at-handoff",
+        detail: "the last real run_tests execution FAILED \u2014 the node handed off with a red suite"
+      });
+    } else if (t.tests_last_run === "pass") {
+      passed.push({ name: "tests-green-at-handoff", detail: "last run_tests execution passed" });
+    }
+    if (passed.length === 0 && failures.length === 0)
+      return null;
+    return { node: run.configKey, ok: failures.length === 0, passed, failures };
   };
 }
 
@@ -36146,7 +36271,7 @@ async function resolveAiProvider(ldClient, context, flagKey = PROVIDER_FLAG_KEY)
 
 // ../shared/dist/anthropic/sandboxTools.js
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync3, readdirSync as readdirSync2, statSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync4, readdirSync as readdirSync3, statSync as statSync2, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve as resolve2, sep } from "node:path";
 
 // ../shared/dist/graph/schema.js
@@ -36252,11 +36377,11 @@ function blastRadius(graph, changedFiles, maxDepth = 3) {
 
 // ../shared/dist/anthropic/ldWriter.js
 var CONTROL_VARIATION = "control";
-var VN_RE = /^v(\d+)$/;
+var VN_RE2 = /^v(\d+)$/;
 function nextVariationValue(values) {
   let max = 0;
   for (const v of values) {
-    const m = typeof v === "string" ? VN_RE.exec(v) : null;
+    const m = typeof v === "string" ? VN_RE2.exec(v) : null;
     if (m)
       max = Math.max(max, Number(m[1]));
   }
@@ -36265,7 +36390,7 @@ function nextVariationValue(values) {
 function latestVariationValue(values) {
   let max = 0;
   for (const v of values) {
-    const m = typeof v === "string" ? VN_RE.exec(v) : null;
+    const m = typeof v === "string" ? VN_RE2.exec(v) : null;
     if (m)
       max = Math.max(max, Number(m[1]));
   }
@@ -36436,7 +36561,7 @@ var LdResourceWriter = class {
       throw new Error(`'${flagKey}' is a legacy BOOLEAN flag \u2014 LaunchDarkly cannot add variations to it. Iterate via a child flag with '${flagKey}' as its prerequisite instead.`);
     }
     const value = opts.value?.trim() || nextVariationValue(values);
-    if (!VN_RE.test(value)) {
+    if (!VN_RE2.test(value)) {
       throw new Error(`variation value must follow the vN lineage (v2, v3, \u2026), got '${value}' \u2014 semantics belong in the name/description`);
     }
     if (values.includes(value)) {
@@ -37079,16 +37204,18 @@ function buildSandboxTools(caps) {
     tools.push(WRITE_FILE_TOOL, EDIT_FILE_TOOL, RUN_TESTS_TOOL, COMMIT_PUSH_TOOL);
   return tools;
 }
-var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "__pycache__", ".venv"]);
+var SKIP_DIRS2 = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "__pycache__", ".venv"]);
 var MAX_GREP_MATCHES = 80;
-var MAX_FILE_BYTES = 2e5;
+var MAX_FILE_BYTES2 = 2e5;
 var TOOL_OWNED_TAGS = /* @__PURE__ */ new Set([
   "flag_created",
   "flag_key",
   "flag_ready",
   "flag_variation",
   "metrics_created",
-  "metric_keys"
+  "metric_keys",
+  "metric_event_keys",
+  "tests_last_run"
 ]);
 var SandboxToolExecutor = class {
   root;
@@ -37316,16 +37443,16 @@ ${body}` };
   }
   readFile(rel) {
     const abs = this.safeResolve(rel);
-    const buf = readFileSync3(abs);
-    if (buf.byteLength > MAX_FILE_BYTES) {
-      return `${buf.subarray(0, MAX_FILE_BYTES).toString("utf8")}
-\u2026[truncated at ${MAX_FILE_BYTES} bytes]`;
+    const buf = readFileSync4(abs);
+    if (buf.byteLength > MAX_FILE_BYTES2) {
+      return `${buf.subarray(0, MAX_FILE_BYTES2).toString("utf8")}
+\u2026[truncated at ${MAX_FILE_BYTES2} bytes]`;
     }
     return buf.toString("utf8");
   }
   listDir(rel) {
     const abs = this.safeResolve(rel);
-    const entries = readdirSync2(abs, { withFileTypes: true }).filter((e) => !SKIP_DIRS.has(e.name)).map((e) => e.isDirectory() ? `${e.name}/` : e.name).sort();
+    const entries = readdirSync3(abs, { withFileTypes: true }).filter((e) => !SKIP_DIRS2.has(e.name)).map((e) => e.isDirectory() ? `${e.name}/` : e.name).sort();
     return entries.length ? entries.join("\n") : "(empty)";
   }
   grep(pattern, rel) {
@@ -37335,18 +37462,18 @@ ${body}` };
     const walk2 = (dir) => {
       if (matches.length >= MAX_GREP_MATCHES)
         return;
-      for (const entry of readdirSync2(dir, { withFileTypes: true })) {
+      for (const entry of readdirSync3(dir, { withFileTypes: true })) {
         if (matches.length >= MAX_GREP_MATCHES)
           return;
-        if (SKIP_DIRS.has(entry.name))
+        if (SKIP_DIRS2.has(entry.name))
           continue;
         const abs = resolve2(dir, entry.name);
         if (entry.isDirectory()) {
           walk2(abs);
-        } else if (entry.isFile() && statSync(abs).size <= MAX_FILE_BYTES) {
+        } else if (entry.isFile() && statSync2(abs).size <= MAX_FILE_BYTES2) {
           let text;
           try {
-            text = readFileSync3(abs, "utf8");
+            text = readFileSync4(abs, "utf8");
           } catch {
             continue;
           }
@@ -37520,13 +37647,13 @@ ${verdicts.join("\n")}` : "")
     const dir = resolve2(this.root, ".release-flags");
     if (!existsSync2(dir))
       return void 0;
-    const files = readdirSync2(dir).filter((name) => name.endsWith(".json"));
+    const files = readdirSync3(dir).filter((name) => name.endsWith(".json"));
     if (!files.length)
       return void 0;
     let sole;
     for (const name of files) {
       try {
-        const data = JSON.parse(readFileSync3(resolve2(dir, name), "utf8"));
+        const data = JSON.parse(readFileSync4(resolve2(dir, name), "utf8"));
         sole = data;
         if (data.flagKey === flagKey)
           return data.scope ?? "frontend";
@@ -37582,6 +37709,12 @@ ${verdicts.join("\n")}` : "")
     if (!keys.includes(result.key))
       keys.push(result.key);
     this.tags.metric_keys = keys.join(",");
+    if (input.event_key) {
+      const events = this.tags.metric_event_keys ? this.tags.metric_event_keys.split(",").filter(Boolean) : [];
+      if (!events.includes(String(input.event_key)))
+        events.push(String(input.event_key));
+      this.tags.metric_event_keys = events.join(",");
+    }
     return { content: result.detail };
   }
   /**
@@ -37607,7 +37740,7 @@ ${verdicts.join("\n")}` : "")
     let existed = false;
     if (existsSync2(abs)) {
       try {
-        existing = JSON.parse(readFileSync3(abs, "utf8"));
+        existing = JSON.parse(readFileSync4(abs, "utf8"));
         existed = true;
       } catch {
         existing = {};
@@ -37724,7 +37857,7 @@ ${verdicts.join("\n")}` : "")
     if (!oldStr)
       return { content: "edit_file: old_string is required", isError: true };
     const abs = this.safeResolve(rel);
-    const text = readFileSync3(abs, "utf8");
+    const text = readFileSync4(abs, "utf8");
     const idx = text.indexOf(oldStr);
     if (idx === -1)
       return { content: `edit_file: old_string not found in ${rel}`, isError: true };
@@ -37784,11 +37917,18 @@ ${s.slice(-15e3)}` : s;
   runTests(dir) {
     if (!this.allowEdits)
       return { content: "run_tests is not available", isError: true };
+    const result = this.runTestsInner(dir);
+    if (!result.content.includes("no recognized test setup")) {
+      this.tags.tests_last_run = result.isError ? "fail" : "pass";
+    }
+    return result;
+  }
+  runTestsInner(dir) {
     const cwd = dir ? this.safeResolve(dir) : this.root;
     const has2 = (f) => existsSync2(resolve2(cwd, f));
     let entries = [];
     try {
-      entries = readdirSync2(cwd);
+      entries = readdirSync3(cwd);
     } catch {
     }
     const where = dir || ".";
@@ -37954,15 +38094,15 @@ function setGenAiAttributes(span, d) {
 
 // ../shared/dist/github/relatedRepos.js
 var import_yaml3 = __toESM(require_dist(), 1);
-import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync6 } from "node:fs";
+import { join as join7 } from "node:path";
 
 // ../shared/dist/graph/assemble.js
 var import_yaml2 = __toESM(require_dist(), 1);
 import { execFileSync as execFileSync2, spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync3, mkdtempSync, readFileSync as readFileSync4, readdirSync as readdirSync3, rmSync } from "node:fs";
+import { existsSync as existsSync3, mkdtempSync, readFileSync as readFileSync5, readdirSync as readdirSync4, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join5, resolve as resolve6 } from "node:path";
+import { join as join6, resolve as resolve6 } from "node:path";
 
 // ../shared/dist/graph/codeRefs.js
 var FLAG_COLUMNS = ["flagkey", "flag_key", "flag"];
@@ -38301,7 +38441,7 @@ function runFindCodeRefs(opts) {
       warning: "ld-find-code-refs binary not found on PATH \u2014 flag\u2192code wrap-point edges unavailable. Install it in the workflow (see bootstrap/github-action-template) to light this up."
     };
   }
-  const outDir = mkdtempSync(join5(tmpdir(), "af-coderefs-"));
+  const outDir = mkdtempSync(join6(tmpdir(), "af-coderefs-"));
   try {
     const run = spawnSync2("ld-find-code-refs", [
       "--dir",
@@ -38318,10 +38458,10 @@ function runFindCodeRefs(opts) {
       const detail = `${run.stderr ?? ""}${run.stdout ?? ""}`.trim().slice(0, 300);
       return { rows: [], warning: `ld-find-code-refs failed (${detail || "unknown error"}) \u2014 wrap-point edges unavailable.` };
     }
-    const csvFile = readdirSync3(outDir).find((f) => f.endsWith(".csv"));
+    const csvFile = readdirSync4(outDir).find((f) => f.endsWith(".csv"));
     if (!csvFile)
       return { rows: [], warning: "ld-find-code-refs produced no CSV \u2014 wrap-point edges unavailable." };
-    const csvText = readFileSync4(join5(outDir, csvFile), "utf8");
+    const csvText = readFileSync5(join6(outDir, csvFile), "utf8");
     const rows = parseCodeRefsCsv(csvText);
     return rows.length ? { rows, csvText } : { rows, csvText, warning: "ld-find-code-refs found no flag references in this checkout." };
   } finally {
@@ -38332,10 +38472,10 @@ async function assembleKnowledgeGraph(opts) {
   const warnings = [];
   const root = resolve6(opts.sandboxRoot);
   let services = [];
-  const registryPath = join5(root, SERVICES_FILE);
+  const registryPath = join6(root, SERVICES_FILE);
   if (existsSync3(registryPath)) {
     try {
-      services = parseServicesRegistry(readFileSync4(registryPath, "utf8"));
+      services = parseServicesRegistry(readFileSync5(registryPath, "utf8"));
       if (services.length === 0)
         warnings.push(`${SERVICES_FILE} declares no services \u2014 file\u2192service attribution unavailable.`);
     } catch (e) {
@@ -38400,11 +38540,11 @@ function parseRelatedRepos(yamlText) {
   return repos;
 }
 function loadRelatedRepos(sandboxRoot) {
-  const path5 = join6(sandboxRoot, SERVICES_FILE);
+  const path5 = join7(sandboxRoot, SERVICES_FILE);
   if (!existsSync4(path5))
     return [];
   try {
-    return parseRelatedRepos(readFileSync5(path5, "utf8"));
+    return parseRelatedRepos(readFileSync6(path5, "utf8"));
   } catch {
     return [];
   }
@@ -38414,7 +38554,7 @@ var RATE_LIMIT_RETRIES2 = 2;
 var RATE_LIMIT_DEFAULT_WAIT_MS = 3e4;
 var RATE_LIMIT_MAX_WAIT_MS = 65e3;
 var MAX_SEARCH_RESULTS = 8;
-var MAX_FILE_BYTES2 = 4e4;
+var MAX_FILE_BYTES3 = 4e4;
 var MAX_DIR_ENTRIES = 100;
 var RelatedReposClient = class {
   repos;
@@ -38504,9 +38644,9 @@ ${i.fragments.map((f) => "  | " + f.replace(/\n/g, "\n  | ")).join("\n")}`).join
       throw new Error(`'${clean}' in ${repo.repo} is not a readable file`);
     }
     const text = data.encoding === "base64" ? Buffer.from(data.content, "base64").toString("utf8") : data.content;
-    if (text.length > MAX_FILE_BYTES2) {
-      return text.slice(0, MAX_FILE_BYTES2) + `
-\u2026 [truncated at ${MAX_FILE_BYTES2} bytes of ${text.length}]`;
+    if (text.length > MAX_FILE_BYTES3) {
+      return text.slice(0, MAX_FILE_BYTES3) + `
+\u2026 [truncated at ${MAX_FILE_BYTES3} bytes of ${text.length}]`;
     }
     return text;
   }
@@ -39456,7 +39596,7 @@ async function fetchApprovalActor(repo, prNumber, token) {
 }
 
 // src/prContext.ts
-import { existsSync as existsSync5, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync7 } from "node:fs";
 function assemblePrContext() {
   const ctx = {
     REPO: process.env.GITHUB_REPOSITORY,
@@ -39465,7 +39605,7 @@ function assemblePrContext() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (eventPath && existsSync5(eventPath)) {
     try {
-      const event = JSON.parse(readFileSync6(eventPath, "utf8"));
+      const event = JSON.parse(readFileSync7(eventPath, "utf8"));
       const pr = event.pull_request;
       if (pr) {
         if (pr.number !== void 0) ctx.PR_NUMBER = String(pr.number);
@@ -39577,9 +39717,9 @@ async function reviewManifestIntent(opts) {
   try {
     if (!opts.prNumber) return {};
     const rel = `.release-flags/pr-${opts.prNumber}.json`;
-    const abs = join7(opts.sandboxRoot, rel);
+    const abs = join8(opts.sandboxRoot, rel);
     if (!existsSync6(abs)) return {};
-    const manifest = JSON.parse(readFileSync7(abs, "utf8"));
+    const manifest = JSON.parse(readFileSync8(abs, "utf8"));
     const { intent, issues } = normalizeReleaseIntent(manifest.releaseIntent);
     if (opts.gatesCleared && !intent.approvedBy) {
       const actor = await fetchApprovalActor(opts.repo, opts.prNumber, process.env.GITHUB_TOKEN);
@@ -39685,12 +39825,12 @@ function mapActionInputs() {
 async function detectConfigDrift(graphKey) {
   try {
     const repoRoot = resolve7(dirname5(fileURLToPath(import.meta.url)), "../../..");
-    const base = join7(repoRoot, "config", "agentcontrol");
+    const base = join8(repoRoot, "config", "agentcontrol");
     const local = computeConfigHash({
-      aiConfigsDir: join7(base, "ai-configs"),
-      graphsDir: join7(base, "graphs"),
-      flagsDir: join7(base, "flags"),
-      toolsDir: join7(base, "tools")
+      aiConfigsDir: join8(base, "ai-configs"),
+      graphsDir: join8(base, "graphs"),
+      flagsDir: join8(base, "flags"),
+      toolsDir: join8(base, "tools")
     });
     if (!local) return void 0;
     const graph = await new LdClient(targetConnection()).getAgentGraph(graphKey);
@@ -39779,7 +39919,9 @@ async function main() {
     }
     return results;
   } : void 0;
-  const walk2 = await walkGraph(graphDef, runner, context, graphTracker, void 0, gate, judgeHook);
+  const verifierWriter = flagCreationWriter();
+  const verifier = buildHandoffVerifier({ sandboxRoot, ...verifierWriter ? { writer: verifierWriter } : {} });
+  const walk2 = await walkGraph(graphDef, runner, context, graphTracker, void 0, gate, judgeHook, verifier);
   for (const r of walk2.runs) {
     console.log(`
 \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550 ${r.configKey} [${r.status}] \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550`);
@@ -39791,6 +39933,8 @@ async function main() {
   if (walk2.skipped.length) console.log(`Skipped: ${walk2.skipped.join(", ")}`);
   const stallText = walk2.stalledAt ? describeStall(walk2.stalledAt) : "";
   if (stallText) console.log(`::warning::AutoFactory: ${stallText}`);
+  const verifyText = walk2.verificationFailed ? `deterministic check failed after '${walk2.verificationFailed.node}': ` + walk2.verificationFailed.failures.map((f) => `[${f.name}] ${f.detail}`).join("; ") : "";
+  if (verifyText) console.log(`::error::AutoFactory: ${verifyText}`);
   if (walk2.pendingApproval) {
     const node = walk2.pendingApproval.node;
     const label = approveLabel(node);
@@ -39851,6 +39995,7 @@ async function main() {
     kg ? `**Knowledge graph:** on \u2014 ${kg.graph.edges.filter((e) => e.kind === "service_calls").length} service edges (traces), ${kg.graph.edges.filter((e) => e.kind === "flag_wraps").length} wrap points (code refs)` + (kg.warnings.length ? `; \u26A0 ${kg.warnings.map((w) => w.split(" \u2014 ")[0]).join("; \u26A0 ")}` : "") : "",
     walk2.skipped.length ? `**Skipped:** ${walk2.skipped.join(", ")}` : "",
     stallText ? `**\u26A0 Stalled:** ${stallText}` : "",
+    verifyText ? `**\u26D4 Deterministic check failed:** ${verifyText}` : "",
     "",
     "| Agent | Status | Judge | Tags |",
     "|---|---|---|---|",
@@ -39861,11 +40006,11 @@ async function main() {
     name: "AutoFactory \u2014 Phase 1",
     repo: context.REPO,
     headSha: checkoutHeadSha(sandboxRoot) ?? context.HEAD_SHA,
-    conclusion: decision.apply || decision.noop ? "success" : "failure",
-    title: decision.reason,
+    conclusion: !walk2.verificationFailed && (decision.apply || decision.noop) ? "success" : "failure",
+    title: walk2.verificationFailed ? `Deterministic check failed after ${walk2.verificationFailed.node}` : decision.reason,
     summary
   });
-  if (!decision.apply && !decision.noop) process.exitCode = 1;
+  if (walk2.verificationFailed || !decision.apply && !decision.noop) process.exitCode = 1;
 }
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((e) => {

@@ -1,5 +1,5 @@
 {
-  "$comment": "Source of truth for AutoFactory Phase 1 routing tags (issue #9 item #5). Each agent emits tags via tag_conversation (or a write tool sets them); the graph edges and the approval gate route on them. This registry is validated by `npm run check:configs` against the graph (config/agentcontrol/graphs/), the agent instructions (config/agentcontrol/ai-configs/), and the README table \u2014 so a renamed/removed/unconsumed tag fails the build instead of silently stalling the chain. Agents may emit additional INFORMATIONAL tags not listed here (e.g. tests_generated); only tags the system routes/decides on belong in this registry.",
+  "$comment": "Source of truth for AutoFactory Phase 1 routing tags (issue #9 item #5). Each agent emits tags via tag_conversation (or a write tool sets them); the graph edges and the approval gate route on them. This registry is validated by `npm run check:configs` against the graph (config/agentcontrol/graphs/), the agent instructions (config/agentcontrol/ai-configs/), and the README table — so a renamed/removed/unconsumed tag fails the build instead of silently stalling the chain. Agents may emit additional INFORMATIONAL tags not listed here (e.g. tests_generated); only tags the system routes/decides on belong in this registry.",
   "tags": {
     "skip_flagging": {
       "producedBy": "autofactory-research-planner",
@@ -125,7 +125,7 @@
       "readBy": [
         "approval"
       ],
-      "description": "low / medium / high \u2014 the categorical companion to risk_score, for humans and as the fallback mapping (low=.25 / medium=.5 / high=.75) when the numeric score is missing."
+      "description": "low / medium / high — the categorical companion to risk_score, for humans and as the fallback mapping (low=.25 / medium=.5 / high=.75) when the numeric score is missing."
     },
     "risk_score": {
       "producedBy": "autofactory-research-planner",
@@ -136,6 +136,26 @@
         "approval"
       ],
       "description": "Numeric change risk 0.0-1.0 from the research planner. Read by the approval policy: in risk-threshold mode, steps gate when risk_score >= the auto-factory-risk-threshold flag (fail-closed when absent). Forced by NODE_REQUIRED_TAGS."
+    },
+    "metric_event_keys": {
+      "producedBy": "autofactory-metrics-author",
+      "production": "tool",
+      "role": "informational",
+      "edges": [],
+      "readBy": [
+        "verifier"
+      ],
+      "description": "Comma-separated event keys of the event-backed metrics created/reused. Set automatically by create_metric. The deterministic handoff shim greps the checkout for an emitter of each one — a metric whose event nothing emits fails the run mechanically."
+    },
+    "tests_last_run": {
+      "producedBy": "autofactory-flag-testing",
+      "production": "tool",
+      "role": "informational",
+      "edges": [],
+      "readBy": [
+        "verifier"
+      ],
+      "description": "pass | fail — the outcome of the LAST real run_tests execution in a node's run. Set automatically by run_tests. The deterministic handoff shim fails the run if a node hands off with a red suite."
     }
   }
 }
