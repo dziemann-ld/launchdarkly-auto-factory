@@ -55,6 +55,7 @@ import {
   resolveApprovalPolicy,
   targetConnection,
   walkGraph,
+  withProvider,
 } from "@auto-factory/shared";
 import { type CliOptions, EXIT } from "./args.js";
 import { type RunOutcome, writeRunRecord } from "./runRecord.js";
@@ -177,7 +178,7 @@ async function run(opts: CliOptions): Promise<number> {
   }
 
   const { ldClient, aiClient } = await getLdSdk();
-  const ldContext = pipelineContext();
+  let ldContext = pipelineContext();
 
   // The CLI runs on Anthropic ONLY. Vega executes agents server-side, so it
   // can't edit this working tree. Cursor executes locally BUT its local agent
@@ -198,6 +199,10 @@ async function run(opts: CliOptions): Promise<number> {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new UsageError("ANTHROPIC_API_KEY is not set (the CLI always executes on the Anthropic runner)");
   }
+  // Stamp the EFFECTIVE provider (always anthropic here) on the run context so
+  // AI config targeting serves only models this runner can execute (rules on
+  // `run.provider` — e.g. never a Cursor-catalog model to an Anthropic run).
+  ldContext = withProvider(ldContext, provider);
 
   const context = await buildWorkingTreeContext(root, state);
   const appProjectKey = process.env.LD_APP_PROJECT_KEY || process.env.LD_PROJECT_KEY;

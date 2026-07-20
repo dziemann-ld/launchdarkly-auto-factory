@@ -50,6 +50,7 @@ import {
   resolveApprovalPolicy,
   targetConnection,
   walkGraph,
+  withProvider,
 } from "@auto-factory/shared";
 import { postCheckRun } from "./checkRun.js";
 import { postPrComment } from "./comment.js";
@@ -389,9 +390,12 @@ async function main(): Promise<void> {
 
   // Native LaunchDarkly: server SDK (flag eval) + AI SDK (graph + agent configs).
   const { ldClient, aiClient } = await getLdSdk();
-  const ldContext = pipelineContext();
+  let ldContext = pipelineContext();
 
   const provider = await resolveAiProvider(ldClient, ldContext);
+  // Stamp the resolved provider on the run context so AI config targeting can
+  // serve provider-compatible model variations (rules on `run.provider`).
+  ldContext = withProvider(ldContext, provider);
   const graphKey = process.env.GRAPH_KEY ?? "gha-auto-factory";
   const graphDef = await aiClient.agentGraph(graphKey, ldContext, buildVariables(context));
   if (!graphDef.enabled) {

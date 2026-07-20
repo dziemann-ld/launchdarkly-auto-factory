@@ -104,6 +104,22 @@ export function pipelineRunId(): string {
 }
 
 /**
+ * Return a copy of the pipeline context with the RESOLVED execution provider
+ * stamped on the `run` kind (same run key — bucketing is untouched). The
+ * runtime resolves the provider flag first (it picks the runner), then tells
+ * targeting what it decided: AI config rules can match `run.provider` to serve
+ * only models the executing provider can actually run (e.g. a Cursor-catalog
+ * model must not be served to an Anthropic-runner run). Contexts without a
+ * `run` kind pass through unchanged, and projects with no provider rules fall
+ * through exactly as before — the attribute is additive.
+ */
+export function withProvider(context: LDContext, provider: string): LDContext {
+  const multi = context as { kind?: string; run?: Record<string, unknown> };
+  if (multi.kind !== "multi" || !multi.run) return context;
+  return { ...multi, run: { ...multi.run, provider } } as unknown as LDContext;
+}
+
+/**
  * The LaunchDarkly targeting context for a pipeline run. A MULTI-context:
  *
  *  - `service` (static): stable across runs — flag evaluation, env scoping, and

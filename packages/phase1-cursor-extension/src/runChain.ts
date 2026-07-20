@@ -25,6 +25,7 @@ import {
   resolveAiProvider,
   resolveApprovalPolicy,
   walkGraph,
+  withProvider,
 } from "@auto-factory/shared";
 import type { CursorContext } from "./cursorContext.js";
 import { buildContextVariables } from "./cursorContext.js";
@@ -59,7 +60,7 @@ export async function runPhase1(opts: RunOptions): Promise<RunResult> {
   const { reporter } = opts;
 
   const { ldClient, aiClient } = await getLdSdk();
-  const ldContext = pipelineContext();
+  let ldContext = pipelineContext();
 
   // The extension executes the chain locally, so it always uses the Anthropic
   // runner. We still read the provider flag for parity and surface a note if a
@@ -68,6 +69,9 @@ export async function runPhase1(opts: RunOptions): Promise<RunResult> {
   if (provider !== "anthropic") {
     reporter.log(`Provider flag selects '${provider}', but the editor extension runs locally on Anthropic. Using Anthropic.`);
   }
+  // Stamp the EFFECTIVE provider (always anthropic here) on the run context so
+  // AI config targeting serves only models this runner can execute.
+  ldContext = withProvider(ldContext, "anthropic");
 
   const variables = buildContextVariables(opts.context, opts.appProjectKey);
   const graphDef = await aiClient.agentGraph(opts.graphKey, ldContext, variables);

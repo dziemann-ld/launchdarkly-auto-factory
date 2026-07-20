@@ -207,6 +207,11 @@ the same across providers — only the model brain changes. The model for each a
 from its AI config, so reasoning agents (research, review) and coding agents can run different
 models and be compared per agent.
 
+The runtime stamps the **resolved provider** on the run context (`run.provider`), so AI config
+targeting rules can serve provider-compatible models — e.g. a Cursor-catalog model only when
+`provider` is `cursor`, an Anthropic-only model otherwise. Optional: with no rules, fallthrough
+serves as before.
+
 ### Observability
 
 Every agent run records duration, tokens, and success/error to LaunchDarkly **AI Config
