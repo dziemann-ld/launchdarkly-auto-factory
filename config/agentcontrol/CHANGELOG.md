@@ -15,6 +15,41 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-07-20 (maintenance sweep)
+
+### ✅ Metrics author: removed the pre-ADR-0013 `flag_created=false → skip` workflow step
+- **Motivation (maintenance sweep):** the committed instructions contradicted
+  themselves. Rule M01 (rewritten for ADR 0013) correctly keys the skip on "no
+  verified flag outcome" and explicitly says `flag_created=false` alone is NOT a
+  skip signal — but the numbered workflow ("## Instructions" step 1) still said
+  "If `flag_created` is false, apply M01 … and finish", and the
+  conflict-resolution list said "if no flag was created, create no metrics."
+  Those two leftovers would skip metrics on exactly the `extend_variation` /
+  `ride_existing` iteration PRs the multivariate work exists for (no flag is
+  *created* on those paths by design).
+- **Change (`autofactory-metrics-author`, committed copy):** workflow step 1 now
+  keys on M01's own condition (`flag_action_executed` skipped, or no flag key at
+  all) and states that `flag_created=false` with a flag key present means
+  proceed; the conflict-resolution line now reads "no verified flag outcome".
+  No rule numbering changed.
+- **Live sync:** with the next `bridge upgrade` (still pending for the whole
+  ADR 0013 batch — see 2026-07-17 rollout status). ⚠ Upgrade only syncs the
+  `default` variation: the live-only `composer-2-5` and `fable-5` A/B arms (see
+  the Fable 5 entry below) must be re-synced to the updated instructions BY HAND
+  afterward, or the arms differ by more than model again.
+
+### ✅ Native cursor-automation rule refreshed to ADR 0013 (bootstrap file, not an LD config)
+- `bootstrap/cursor-automation/dot-cursor/rules/autofactory.mdc` still taught the
+  pre-0013 world: boolean control/treatment flags, no `flag_action` decision, and
+  a `releaseOverrides` manifest. Rewritten: string-multivariate flag convention
+  (`control`+`v1`, created dark, client-side availability by scope), tool
+  translations for `get_flag_state` / `add_variation` / `use_existing_flag` /
+  `write_manifest` / `read_ld_docs` (mapped to LD MCP tools + native edits),
+  planner phase now decides `flag_action`, and the manifest example is
+  schema 1.2 (`targetVariation`, `releasePlan`, human-owned `releaseIntent`
+  skeleton). Logged here because that front end reads the SAME live configs;
+  no LD-side change.
+
 ## 2026-07-20 (later)
 
 ### ✅ Fable 5 A/B arm on the implementer + metrics author

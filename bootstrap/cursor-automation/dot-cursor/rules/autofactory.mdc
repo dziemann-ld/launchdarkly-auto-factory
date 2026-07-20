@@ -1,5 +1,5 @@
 ---
-description: LaunchDarkly AutoFactory Phase 1 — research a change, create a feature flag, instrument guarded-release metrics, write flag-path tests, and review. Invoked by the /autofactory command or by @autofactory.
+description: LaunchDarkly AutoFactory Phase 1 — research a change, decide the flag action (create / extend / ride / child), instrument guarded-release metrics, write flag-path tests, and review. Invoked by the /autofactory command or by @autofactory.
 alwaysApply: false
 ---
 
@@ -14,7 +14,9 @@ conventions** — it does not restate each phase's rules.
 ## Prerequisites (assume these are configured)
 
 - The **LaunchDarkly MCP server** is enabled in Cursor (provides `get-ai-config`,
-  `create-feature-flag`, the metric-creation tool, and flag/AI-config tools).
+  `create-feature-flag`, `get-feature-flag`, `update-feature-flag`,
+  `get-flag-status-across-environments`, the metric-creation tool, and
+  flag/AI-config tools).
 - Project keys:
   - **Factory project** (holds the agent instructions): `auto-factory-prototype`
   - **App project** (where flags + metrics are created): `autofactory-demo`
@@ -35,8 +37,15 @@ native equivalent:
 
 | Instruction says | Do this instead |
 |---|---|
-| `create_flag` / "create the flag" | Call the **LaunchDarkly MCP `create-feature-flag`** tool against the **app project**, using the flag convention below. |
+| `get_flag_state` | Call MCP `get-feature-flag` + `get-flag-status-across-environments` against the **app project** and derive what the instructions ask for: flag kind (boolean vs multivariate), the `control`/`v1`/…/`vN` variation lineage, and a per-environment released-ness verdict (a variation is RELEASED if the flag is on and fallthrough/rules serve it real traffic). |
+| `create_flag` / "create the flag" | Call MCP `create-feature-flag` against the **app project**, using the flag convention below (string multivariate, created dark). |
+| `add_variation` | Call MCP `update-feature-flag` to APPEND the next `vN` string variation (never modify, reorder, or remove existing variations; never touch targeting). If the flag is boolean, do NOT append — that's the `child_flag` path. If the intended `vN` value already exists, reuse it. |
+| `use_existing_flag` | No write. VERIFY via `get-feature-flag` + flag status that the ridden variation is genuinely UNRELEASED in the app project (dark or not serving traffic); refuse to ride a released variation — fall back to the extend/child decision. |
 | `create_metric` / "create the metric" | Call the **LaunchDarkly MCP metric-creation tool** against the **app project**, using the metric convention below. |
+| `list_metrics` | Use the MCP metric-listing tool if the server provides one; otherwise skip discovery and rely on idempotent creation (an already-exists response = reuse). |
+| `write_manifest` | Edit `.release-flags/<change-id>.json` natively, MERGING into the existing content (never drop existing `releasePlan` keys). NEVER modify `releaseIntent` — it is human-owned; create it only as an empty skeleton. |
+| `read_ld_docs` | Fetch the referenced `launchdarkly.com/docs` page (the docs site serves markdown). Fail-soft: if unavailable, proceed from repo evidence. |
+| `query_dependencies` / `query_related_repos` | Not available here. Treat cross-repo/graph coverage as UNKNOWN (never "low risk") and note the gap in the brief. |
 | `write_file` / `edit_file` | Edit files natively. |
 | `run_tests` | Run the repo's test suite in the terminal (detect pytest / npm / go). |
 | `commit_and_push` | **Do nothing destructive** — leave all edits in the working tree for the developer to review and commit. Do not commit or push. |
@@ -54,31 +63,56 @@ then carry them out using the tool translation above. Interpolate any
 placeholders from the current repo / branch / change id / app project key.
 
 1. **Research & Plan** — config key `autofactory-research-planner`. Classify the
-   change and produce the brief. **Short-circuit:** if the change is config-only,
-   a dependency bump, infrastructure, test-only, or docs with no user-facing
-   behavior change, STOP here — create no flag, no metrics, no tests; report that
-   no flag was needed and finish.
-2. **Flag** — config key `autofactory-flag-implementer`. Create the flag, then
-   wire the new behavior behind it. Flag-off must preserve existing behavior.
+   change, research the flag landscape (via the `get_flag_state` translation),
+   decide the **`flag_action`** (`create` | `extend_variation` | `ride_existing`
+   | `child_flag` | `none`) from TARGETING evidence per the fetched instructions,
+   create the release manifest skeleton, and produce the brief.
+   **Short-circuit:** if the change is config-only, a dependency bump,
+   infrastructure, test-only, or docs with no user-facing behavior change, STOP
+   here — create no flag, no metrics, no tests; report that no flag was needed
+   and finish.
+   *(The live graph inserts a manifest-steward step after research to normalize
+   human `releaseIntent` edits; skipped here — the developer is in the loop
+   interactively and edits the manifest directly.)*
+2. **Flag** — config key `autofactory-flag-implementer`. EXECUTE the planner's
+   `flag_action` (create the flag, append the `vN` variation, ride an unreleased
+   variation, or create a child flag behind the parent), then wire the code path
+   behind it per the fetched instructions. String evaluation with fail-safe
+   default `"control"`; flag-off / control must preserve existing behavior;
+   iterations must keep the previous variation's path intact.
 3. **Metrics** — config key `autofactory-metrics-author`. Instrument `track()`
-   events on the flagged path, create the metrics, and write/update the release
-   manifest (below).
-4. **Tests** — config key `autofactory-flag-testing`. Write flag-on and flag-off
-   tests and run them; fix failures.
+   events on the flagged path (event keys as LITERAL strings — greppability is
+   the contract), create the metrics, and write/update the release manifest
+   (below). On iterations (extend/ride), reuse the flag's existing metrics first.
+4. **Tests** — config key `autofactory-flag-testing`. Write variation tests
+   (control / vN, plus vN-1 three-way coverage on extensions) and run them; fix
+   failures.
 5. **Review** — config key `autofactory-code-reviewer`. Review the whole change
-   set and produce a verdict (APPROVE/REJECT + risk level).
+   set and produce a verdict (APPROVE/REJECT + risk level). `ride_existing` is
+   not a missing flag; a preserved control default is required.
 
 ## LaunchDarkly conventions
 
-**Flag** (via MCP `create-feature-flag`, app project) — boolean, treatment=true /
-control=false, temporary, off = control (so flag-off preserves existing
-behavior):
+**Flag** (via MCP `create-feature-flag`, app project) — **string multivariate**,
+temporary, created **dark** (off = `control`, so nothing changes at deploy;
+release happens later, decoupled). Multivariate from day one is deliberate:
+LaunchDarkly fixes a flag's kind at creation, so only flags born multivariate
+can take `v2`, `v3`, … iteration variations later.
 
 - `key`: `enable-<descriptive-name>` (no ticket id)
-- `variations`: `[{ value: true, name: "Treatment" }, { value: false, name: "Control" }]`
-- `temporary`: true; off-variation = the Control (false) variation
+- `variations` (string): `[{ value: "control", name: "Control", description: "Existing behavior — served while the flag is off (safe default)." }, { value: "v1", name: "v1", description: "<new behavior>" }]`
+- `temporary`: true; `defaults`: on = `v1` (index 1), off = `control` (index 0)
 - `tags`: `["auto-factory", "auto-generated"]`
+- Frontend/fullstack-scoped flags: set `clientSideAvailability.usingEnvironmentId: true`
 - Idempotent: if it already exists (409), reuse it.
+- **Code wiring**: evaluate as a string variation with default `"control"`
+  (e.g. `variation(key, context, "control") === "v1"`), never through a boolean
+  helper — multivariate flags through boolean helpers is the known-bad shape.
+- **Legacy boolean flags** cannot take new variations: iterations on them go
+  through a `child_flag` (a new multivariate flag with the boolean parent as a
+  prerequisite; arm on-behind-parent ONLY if the prerequisite is currently
+  unmet — if the parent is already released, attach the prerequisite but keep
+  the child dark).
 
 **Metric** (via the LaunchDarkly MCP metric-creation tool, app project) — one per
 category the change exposes. Create each as a `custom` metric whose event key
@@ -93,28 +127,40 @@ matches the custom event name your `track()` call emits, with
 | `business` | no | `HigherThanBaseline` | — |
 
 Metric key convention: `<flag-key>-<category>` (e.g. `enable-x-error-rate`,
-`enable-x-latency`, `enable-x-success-rate`). Idempotent: if the metric already
-exists (409), reuse it.
+`enable-x-latency`, `enable-x-success-rate`). Metric keys stay flag-scoped —
+never mint per-variation metric keys; the release attributes per variation
+automatically. Idempotent: if the metric already exists (409), reuse it.
 
 **Release manifest** — write `.release-flags/<change-id>.json` so Phase 2 can
-discover it:
+discover it (schema 1.2; `releaseOverrides` is the legacy name for
+`releasePlan` — write the current key):
 
 ```json
 {
+  "schemaVersion": "1.2",
   "flagKey": "<flag-key>",
-  "releaseOverrides": {
+  "targetVariation": "<vN this change's code path lives under>",
+  "releasePlan": {
     "metricKeys": ["<flag-key>-error-rate", "<flag-key>-latency", "<flag-key>-success-rate"],
     "randomizationUnit": "user"
-  }
+  },
+  "releaseIntent": {}
 }
 ```
+
+`targetVariation` is the `vN` the code you wired evaluates for (from create,
+extend, or ride) — Beacon releases exactly that variation. `releaseIntent` is
+the HUMAN's block: create it empty and never fill or broaden it; the developer
+edits it on the PR if they want `hold` / `manual` / prerequisites.
 
 ## Output
 
 Edits stay in the working tree (nothing committed/pushed). End with a summary:
 
-- the flag key created (and a link: `https://app.launchdarkly.com/autofactory-demo/~/features/<flag-key>`)
-- the metric keys created (links: `https://app.launchdarkly.com/autofactory-demo/metrics/<metric-key>/details`)
+- the **flag action executed** (`create` | `extend_variation` | `ride_existing`
+  | `child_flag` | `none`) and the **target variation** (`vN`)
+- the flag key (and a link: `https://app.launchdarkly.com/autofactory-demo/~/features/<flag-key>`)
+- the metric keys created or reused (links: `https://app.launchdarkly.com/autofactory-demo/metrics/<metric-key>/details`)
 - the manifest path written
 - the review **verdict** and **risk level** as a fenced JSON block:
   ```json

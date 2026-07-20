@@ -11870,14 +11870,14 @@ var require_promisify = __commonJS({
   "../../node_modules/@launchdarkly/node-server-sdk/node_modules/@launchdarkly/js-server-sdk-common/dist/async/promisify.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
-    function promisify2(method) {
+    function promisify3(method) {
       return new Promise((resolve8) => {
         method((val) => {
           resolve8(val);
         });
       });
     }
-    exports.default = promisify2;
+    exports.default = promisify3;
   }
 });
 
@@ -26716,8 +26716,8 @@ var init_fs_util = __esm({
 import * as fs2 from "node:fs/promises";
 import * as fssync from "node:fs";
 import * as path3 from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { execFile as execFile2 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 async function setupSkills(ctx) {
@@ -26873,7 +26873,7 @@ var init_skills = __esm({
     init_error();
     init_log();
     init_fs_util();
-    execFileAsync = promisify(execFile);
+    execFileAsync = promisify2(execFile2);
   }
 });
 
@@ -33773,6 +33773,11 @@ async function walkGraph(graphDef, runner, context, graphTracker, onEvent, gate,
   };
 }
 
+// ../shared/dist/workingTree.js
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+var exec = promisify(execFile);
+
 // ../shared/dist/handoffVerifier.js
 import { readdirSync as readdirSync2, readFileSync as readFileSync3, statSync } from "node:fs";
 import { join as join2 } from "node:path";
@@ -33861,7 +33866,7 @@ function buildHandoffVerifier(opts) {
     if (t.metric_event_keys) {
       for (const eventKey of t.metric_event_keys.split(",").filter(Boolean)) {
         const emitters = filesContaining(opts.sandboxRoot, eventKey);
-        check(emitters.length > 0, "metric-event-instrumented", `event '${eventKey}' emitted in ${emitters.slice(0, 2).join(", ")}`, `metric event '${eventKey}' has no emitter in the code \u2014 the metric exists in LaunchDarkly but will never receive data`);
+        check(emitters.length > 0, "metric-event-instrumented", `event '${eventKey}' emitted in ${emitters.slice(0, 2).join(", ")}`, `metric event '${eventKey}' has no emitter in the code \u2014 the metric exists in LaunchDarkly but will never receive data. This check greps for the LITERAL key: if the code builds it dynamically (e.g. \`\${FLAG_KEY}-suffix\` or concatenation), rewrite the emitter to pass the literal string \u2014 deterministic verification and LaunchDarkly code references both need greppable literals`);
       }
     }
     if (t.tests_last_run === "fail") {
@@ -39191,6 +39196,13 @@ ${req.prompt}`;
 };
 
 // ../shared/dist/judges.js
+var judgeSdkLogger = {
+  error: (...args) => console.error("[judge-sdk]", ...args),
+  warn: (...args) => console.warn("[judge-sdk]", ...args),
+  info: (...args) => console.log("[judge-sdk]", ...args),
+  debug: () => {
+  }
+};
 var CompletionJudgeRunner = class {
   judgeCfg;
   completion;
@@ -39288,7 +39300,7 @@ ${evidence}`;
           judgedConfigKey: configKey,
           ...opts.provider ? { provider: opts.provider } : {}
         });
-        const judge = new Judge(judgeCfg, runner, rate);
+        const judge = new Judge(judgeCfg, runner, rate, judgeSdkLogger);
         const result = await judge.evaluate(judgeInput, output);
         results.push(result);
         if (result.sampled) {
@@ -39355,7 +39367,7 @@ ${patch}`);
 
 // ../shared/dist/anthropic/judgeCompletion.js
 init_sdk();
-var MAX_TOKENS2 = 1024;
+var MAX_TOKENS2 = 4096;
 function createAnthropicJudgeCompletion(apiKey) {
   const client = new Anthropic(apiKey ? { apiKey } : {});
   return async (req) => {
@@ -39374,10 +39386,15 @@ function createAnthropicJudgeCompletion(apiKey) {
       tool_choice: { type: "tool", name: "record_evaluation" }
     });
     const toolUse = resp.content.find((b) => b.type === "tool_use");
+    const truncated = resp.stop_reason === "max_tokens";
+    if (truncated) {
+      console.warn(`[judge] completion hit max_tokens (${MAX_TOKENS2}) \u2014 evaluation discarded as truncated`);
+    }
+    const ok = toolUse !== void 0 && !truncated;
     return {
-      ...toolUse ? { parsed: toolUse.input } : {},
-      content: JSON.stringify(toolUse?.input ?? null),
-      success: toolUse !== void 0,
+      ...ok ? { parsed: toolUse.input } : {},
+      content: truncated ? `judge output truncated at max_tokens=${MAX_TOKENS2}; partial: ${JSON.stringify(toolUse?.input ?? null)}` : JSON.stringify(toolUse?.input ?? null),
+      success: ok,
       tokens: {
         input: resp.usage.input_tokens,
         output: resp.usage.output_tokens,
