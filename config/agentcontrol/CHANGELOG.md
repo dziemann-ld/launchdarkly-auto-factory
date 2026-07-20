@@ -27,12 +27,13 @@ Status legend: ✅ done · 🔜 planned/in progress
 - **Production targeting** on both configs: fallthrough rollout on the `run`
   context changed from 50/50 (Sonnet 4.6 / Composer 2.5) to
   **40% `default` (Sonnet 4.6) / 40% `composer-2-5` / 20% `fable-5`**.
-- **Caveats:** (1) the CLI front end always executes on the Anthropic runner,
+- **Caveat:** the CLI front end always executes on the Anthropic runner,
   which cannot serve the `composer-2-5` arm — CLI runs bucketed there fail the
-  node; run the A/B via the GitHub Action on the cursor provider. (2) The
-  `composer-2-5` variations carry drifted instructions (pre-multivariate on the
-  implementer; pre-M12 on the metrics author) and no tool attachments — known
-  drift, reported not overwritten by `upgrade`.
+  node; run the A/B via the GitHub Action on the cursor provider.
+- **Composer drift resolved (same day):** both `composer-2-5` variations were
+  synced to their config's `default` — instructions (multivariate rules on the
+  implementer, M12 on the metrics author) and tool attachments — so the three
+  arms differ ONLY by model, which is what makes the A/B a model comparison.
 
 
 
