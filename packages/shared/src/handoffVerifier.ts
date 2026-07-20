@@ -177,7 +177,9 @@ export function buildHandoffVerifier(opts: HandoffVerifierOptions): HandoffVerif
           emitters.length > 0,
           "metric-event-instrumented",
           `event '${eventKey}' emitted in ${emitters.slice(0, 2).join(", ")}`,
-          `metric event '${eventKey}' has no emitter in the code — the metric exists in LaunchDarkly but will never receive data`,
+          `metric event '${eventKey}' has no emitter in the code — the metric exists in LaunchDarkly but will never receive data. ` +
+            `This check greps for the LITERAL key: if the code builds it dynamically (e.g. \`\${FLAG_KEY}-suffix\` or concatenation), ` +
+            `rewrite the emitter to pass the literal string — deterministic verification and LaunchDarkly code references both need greppable literals`,
         );
       }
     }

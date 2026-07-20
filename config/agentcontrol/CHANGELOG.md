@@ -15,7 +15,24 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
-## 2026-07-17 (later)
+## 2026-07-20
+
+### ✅ Metrics author: literal event keys (M12) — instruction hardening from live run
+- **Motivation (live CLI run, `show-free-shipping-nudge`):** the metrics author
+  instrumented events with a template literal — `` track(`${FLAG_KEY}-error`) `` —
+  so the deterministic `metric-event-instrumented` shim (which greps for the exact
+  event key) found no emitter and halted the chain after the metrics step. The
+  instrumentation was real; the key just wasn't greppable. LaunchDarkly code
+  references have the same requirement.
+- **Change (`autofactory-metrics-author`):** new rule **M12 (literal event keys)** —
+  every `track()` call must pass the event key as a literal string exactly matching
+  what was given to `create_metric`; template literals/concatenation/variables fail
+  the run. The Instrumentation Pattern section now says "written as a LITERAL
+  string" at the `track()` syntax. The shim stays strict (greppable literal = the
+  verifiable contract); its failure detail now explains the dynamic-key case and
+  the fix (runtime change, noted here because it pairs with M12).
+
+
 
 ### ✅ Deterministic handoff shims: agent claims re-derived from primary evidence
 - **Motivation (live run a):** the implementer wired a multivariate flag through a

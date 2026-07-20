@@ -9,7 +9,11 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { JudgeCompletion } from "../judges.js";
 import { anthropicModelId } from "./anthropicAgentRunner.js";
 
-const MAX_TOKENS = 1024;
+// Generous on purpose: the output is one {score, reasoning} tool call, but the
+// reasoning is written against a large evidence diff. At 1024 a verbose judge
+// hit max_tokens MID-TOOL-INPUT, which surfaces as a silent parse failure in
+// the SDK Judge ("eval FAILED: unknown" — live CLI run, 2026-07-20).
+const MAX_TOKENS = 4096;
 
 export function createAnthropicJudgeCompletion(apiKey?: string): JudgeCompletion {
   const client = new Anthropic(apiKey ? { apiKey } : {});
@@ -29,10 +33,20 @@ export function createAnthropicJudgeCompletion(apiKey?: string): JudgeCompletion
       tool_choice: { type: "tool", name: "record_evaluation" },
     });
     const toolUse = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+    // A max_tokens stop truncates the tool input — whatever partially parsed is
+    // NOT a trustworthy evaluation. Fail explicitly instead of letting the
+    // truncated object die as an unexplained schema-parse failure downstream.
+    const truncated = resp.stop_reason === "max_tokens";
+    if (truncated) {
+      console.warn(`[judge] completion hit max_tokens (${MAX_TOKENS}) — evaluation discarded as truncated`);
+    }
+    const ok = toolUse !== undefined && !truncated;
     return {
-      ...(toolUse ? { parsed: toolUse.input as Record<string, unknown> } : {}),
-      content: JSON.stringify(toolUse?.input ?? null),
-      success: toolUse !== undefined,
+      ...(ok ? { parsed: toolUse.input as Record<string, unknown> } : {}),
+      content: truncated
+        ? `judge output truncated at max_tokens=${MAX_TOKENS}; partial: ${JSON.stringify(toolUse?.input ?? null)}`
+        : JSON.stringify(toolUse?.input ?? null),
+      success: ok,
       tokens: {
         input: resp.usage.input_tokens,
         output: resp.usage.output_tokens,

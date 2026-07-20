@@ -21,7 +21,7 @@
  * never fails the chain.
  */
 
-import type { LDContext } from "@launchdarkly/node-server-sdk";
+import type { LDContext, LDLogger } from "@launchdarkly/node-server-sdk";
 import {
   Judge,
   type LDAIAgentConfig,
@@ -67,6 +67,19 @@ interface JudgeSpanMeta {
   /** Execution backend for the judge completion ("anthropic" | "cursor"). */
   provider?: string;
 }
+
+/**
+ * Console logger handed to the SDK's Judge class. Without one, its diagnostics
+ * are silent — most importantly "Could not parse evaluation response: {...}",
+ * the ONLY place the offending payload surfaces when an eval fails without an
+ * error message (that path otherwise logs as "eval FAILED: unknown").
+ */
+const judgeSdkLogger: LDLogger = {
+  error: (...args: unknown[]) => console.error("[judge-sdk]", ...args),
+  warn: (...args: unknown[]) => console.warn("[judge-sdk]", ...args),
+  info: (...args: unknown[]) => console.log("[judge-sdk]", ...args),
+  debug: () => {},
+};
 
 /** Adapts a JudgeCompletion to the SDK's Runner interface for one judge config. */
 class CompletionJudgeRunner implements Runner {
@@ -217,7 +230,7 @@ export function createJudgeHook(opts: CreateJudgeHookOptions): JudgeHook {
           judgedConfigKey: configKey,
           ...(opts.provider ? { provider: opts.provider } : {}),
         });
-        const judge = new Judge(judgeCfg, runner, rate);
+        const judge = new Judge(judgeCfg, runner, rate, judgeSdkLogger);
         const result = await judge.evaluate(judgeInput, output);
         results.push(result);
         if (result.sampled) {
