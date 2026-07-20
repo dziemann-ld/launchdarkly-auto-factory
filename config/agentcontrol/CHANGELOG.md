@@ -15,6 +15,31 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-07-20 (provider-aware model routing)
+
+### ✅ run.provider context attribute + provider-aware A/B rules
+- **Why:** no single provider could execute the 40/40/20 three-model split —
+  verified live that `claude-fable-5` works on the Anthropic API but is
+  REJECTED by the Cursor plan (fast server-side error on every parameter
+  variant; Sonnet succeeds on the identical path), while `composer-2.5` can
+  only run on Cursor. Prerequisites can't express this (flag-level gates, not
+  variation routers) — the transferable LD-native fix is a context attribute.
+- **Runtime (tooling `81dfc18`):** after resolving `auto-factory-ai-provider`,
+  every front end stamps the EFFECTIVE provider on the run context
+  (`run.provider`); AI config targeting rules can then serve only models the
+  executing runner can run. Additive — no rules → fallthrough as before.
+- **Targeting (production, both `autofactory-flag-implementer` and
+  `autofactory-metrics-author`):** replaced the flat 40/40/20 fallthrough with
+  rules — `run.provider = cursor` → 50/50 `default` (Sonnet 4.6) /
+  `composer-2-5`; `run.provider = anthropic` → 50/50 `default` / `fable-5`;
+  fallthrough → 100% `default` (safe for vega/older runtimes).
+- **`auto-factory-ai-provider` (production):** fallthrough changed from fixed
+  `cursor` to a **50/50 anthropic/cursor rollout on the run context** — each
+  pipeline run picks a provider, and the rules above pick compatible models.
+  Net model mix per agent-run: 50% Sonnet, 25% Composer, 25% Fable.
+- **Demo repo:** `autofactory-cursor.yml` now passes `ANTHROPIC_API_KEY`
+  (secret already existed) so either provider can execute per run.
+
 ## 2026-07-20 (maintenance sweep)
 
 ### ✅ Metrics author: removed the pre-ADR-0013 `flag_created=false → skip` workflow step
