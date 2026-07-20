@@ -268,6 +268,9 @@ export class AnthropicAgentRunner implements AgentRunner {
 
     const system = (req.instructions ?? "") + modeNote(caps);
     const model = anthropicModelId(req.model);
+    // Parity with the Cursor runner's model log: the served variation's model is
+    // what makes A/B run logs attributable without querying LD monitoring.
+    console.log(`[node] ${req.configKey} anthropic model → '${model}'${req.model && req.model !== model ? ` (LD: '${req.model}')` : ""}`);
     const executor = new SandboxToolExecutor(
       this.opts.sandboxRoot,
       writer,
