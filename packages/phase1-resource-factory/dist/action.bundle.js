@@ -36235,6 +36235,12 @@ function pipelineRunId() {
     currentRunId = randomUUID2();
   return currentRunId;
 }
+function withProvider(context, provider) {
+  const multi = context;
+  if (multi.kind !== "multi" || !multi.run)
+    return context;
+  return { ...multi, run: { ...multi.run, provider } };
+}
 function pipelineContext(extra = {}) {
   currentRunId = randomUUID2();
   return {
@@ -39864,8 +39870,9 @@ async function main() {
   mapActionInputs();
   const context = assemblePrContext();
   const { ldClient, aiClient } = await getLdSdk();
-  const ldContext = pipelineContext();
+  let ldContext = pipelineContext();
   const provider = await resolveAiProvider(ldClient, ldContext);
+  ldContext = withProvider(ldContext, provider);
   const graphKey = process.env.GRAPH_KEY ?? "gha-auto-factory";
   const graphDef = await aiClient.agentGraph(graphKey, ldContext, buildVariables(context));
   if (!graphDef.enabled) {
