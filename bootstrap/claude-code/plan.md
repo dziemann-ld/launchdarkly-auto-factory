@@ -1,10 +1,12 @@
 # Plan: AutoFactory Phase 1 in a Claude Code session
 
-**Status: plan, not built. No execution-mode decision has been made yet** — this
-document lays out the candidate designs and their tradeoffs so we (and the
-design partner) can choose deliberately. It would become Phase 1 front end #4,
-alongside the GitHub Action, the Cursor/VS Code extension, and the native
-Cursor automation.
+**Status: Option C is built** — the `autofactory` CLI
+([`packages/phase1-cli/`](../../packages/phase1-cli/)) plus the drop-in Claude
+Code skill ([`skills/autofactory/`](skills/autofactory/), setup in
+[README.md](README.md)) are Phase 1 front end #4, alongside the GitHub Action,
+the Cursor/VS Code extension, and the native Cursor automation. Options A and B
+below remain candidate designs (not built); the comparison table is the record
+of why C was chosen as the full-fidelity path.
 
 ## Goal
 
@@ -237,7 +239,8 @@ configuration in the partner's repo, not a ceiling the factory owns.
 
 Open items regardless of, or depending on, the mode chosen:
 
-1. **Decision needed:** primary mode (A / B / C) for the design partner.
+1. ~~**Decision needed:** primary mode (A / B / C) for the design partner.~~
+   **Decided: C** — built as `packages/phase1-cli` + the skill in this directory.
 2. **Build (A/B):** port `autofactory.mdc` → `.claude/skills/autofactory/SKILL.md`
    including the approval-flag reading + fail-closed gate procedure (new —
    the Cursor rule doesn't have it); `.mcp.json`; suggested
@@ -246,9 +249,13 @@ Open items regardless of, or depending on, the mode chosen:
    sidecar and where the `ANTHROPIC_API_KEY` lives.
 4. **Build (B follow-up):** phase-marker fork of the proxy for per-agent
    attribution + judge targeting; try upstreaming.
-5. **Build (C):** the `autofactory` CLI package (thin wrapper over the
+5. ~~**Build (C):** the `autofactory` CLI package (thin wrapper over the
    extension's `runChain` shape) with `--approve <nodeKey>` re-run semantics
-   and a `pendingApproval` exit code.
+   and a `pendingApproval` exit code.~~ **Done** — plus judges wired with
+   working-tree evidence (the plan under-specified this: commit-scoped diff
+   evidence is empty in `workingTree` mode, so `createWorkingTreeEvidence`
+   was added to the shared core), KG/cross-repo tools, and the config-skew
+   warning, none of which the extension's `runChain` had.
 6. **Prototype (A/B):** `PreToolUse` hook that hard-blocks `create-feature-flag`
    until a gate is satisfied — upgrades native approvals from advisory to
    enforced.

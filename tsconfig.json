@@ -5,6 +5,7 @@
     { "path": "packages/config-bridge" },
     { "path": "packages/beacon" },
     { "path": "packages/phase1-resource-factory" },
+    { "path": "packages/phase1-cli" },
     { "path": "packages/phase1-cursor-extension" }
   ]
 }

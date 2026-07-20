@@ -17,9 +17,10 @@ end-to-end against a live demo repo. Not a product.
   (`.release-flags/…json`) records the flag, metrics, and rollout parameters. LaunchDarkly
   **judges** attached to the coding agents score each output 0..1 against the agent's actual
   git diff — a sampled, non-blocking evaluation layer (the reviewer remains the gate; see
-  [ADR 0007](docs/adr/0007-judges-for-coding-agents.md)). Phase 1 has three
+  [ADR 0007](docs/adr/0007-judges-for-coding-agents.md)). Phase 1 has four
   interchangeable front ends over one shared core (see [Phase 1 front ends](#phase-1-front-ends)):
-  a **GitHub Action**, a **Cursor/VS Code extension**, and a **native Cursor automation**.
+  a **GitHub Action**, a **Cursor/VS Code extension**, a **native Cursor automation**,
+  and a **headless CLI** driven from a terminal or a Claude Code session.
 - **Phase 2 (after deploy):** Beacon, a small HTTP service, receives deploy webhooks,
   diffs `.release-flags/` between the deployed SHA and the previous one, and starts a
   guarded release for each new manifest (turning the flag on atomically). It then monitors
@@ -37,6 +38,7 @@ Design history: [docs/adr/](docs/adr/).
 | `packages/phase1-resource-factory/` | Phase 1 front end #1 (GitHub Action): code; its drop-in workflow lives in `bootstrap/github-action-template/` |
 | `packages/phase1-cursor-extension/` | Phase 1 front end #2 (Cursor/VS Code extension): working-tree edits from the editor, calls Anthropic directly |
 | `bootstrap/cursor-automation/` | Phase 1 front end #3 (native Cursor automation): a drop-in `.cursor/` rule + command + MCP config; runs in Cursor's own agent (local prototype) |
+| `packages/phase1-cli/` | Phase 1 front end #4 (headless `autofactory` CLI): the full chain against a local working tree; the drop-in Claude Code skill that drives it lives in `bootstrap/claude-code/` |
 | `packages/beacon/` | Phase 2 release orchestrator (webhooks, discovery, trigger, monitor) |
 | `packages/config-bridge/` | CLI that provisions/syncs the agent configs and graph between LD projects |
 | `config/agentcontrol/ai-configs/` | The six agent + two judge definitions (instructions live here and in LD) |
@@ -48,8 +50,8 @@ Design history: [docs/adr/](docs/adr/).
 
 ## Phase 1 front ends
 
-The same six-agent chain (one shared core in `packages/shared`) runs from three entry points;
-pick whichever fits where you work. All three create the same flag/metrics/tests and write the
+The same six-agent chain (one shared core in `packages/shared`) runs from four entry points;
+pick whichever fits where you work. All four create the same flag/metrics/tests and write the
 same release manifest — they differ only in trigger, output, and which models run the agents.
 
 | Front end | Trigger | Output | Models | Status |
@@ -57,8 +59,9 @@ same release manifest — they differ only in trigger, output, and which models 
 | **GitHub Action** — [`packages/phase1-resource-factory`](packages/phase1-resource-factory/), template in [`bootstrap/github-action-template/`](bootstrap/github-action-template/) | a pull request, in CI | commits to the PR branch | Anthropic / Vega / Cursor (flag-selected; model per agent from the AI config) | primary, verified path |
 | **Cursor/VS Code extension** — [`packages/phase1-cursor-extension`](packages/phase1-cursor-extension/) | a button or a new commit, in the editor | edits left in your working tree | Anthropic API (Cursor can't expose its models to extensions) | working |
 | **Native Cursor automation** — [`bootstrap/cursor-automation`](bootstrap/cursor-automation/) | the `/autofactory` command in Cursor | edits left in your working tree | Cursor's own models (no API key) | local prototype; cloud (auto, PR-based) is a later phase |
+| **Headless CLI / Claude Code** — [`packages/phase1-cli`](packages/phase1-cli/), skill in [`bootstrap/claude-code/`](bootstrap/claude-code/) | `autofactory run` in a terminal, or `/autofactory` in Claude Code | edits left in your working tree | Anthropic API only (model per agent from the AI config; the working-tree ceiling requires the sandboxed runner — see the CLI README) | new; full fidelity (judges, monitoring, gates) |
 
-Setup for the GitHub Action is below; the extension and the automation each have their own README.
+Setup for the GitHub Action is below; the extension, the automation, and the CLI each have their own README.
 
 ## Phase 1 setup (GitHub Action)
 

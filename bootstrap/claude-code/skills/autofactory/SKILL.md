@@ -1,0 +1,94 @@
+---
+name: autofactory
+description: Run LaunchDarkly AutoFactory Phase 1 on the current change set — create a feature flag (targeting off), wire the behavior behind it, add guarded-release metrics + instrumentation, flag-on/flag-off tests, a release manifest, and a review verdict. Use when the user says "run AutoFactory", "/autofactory", or asks to flag/instrument their current changes.
+---
+
+# AutoFactory Phase 1 (via the `autofactory` CLI)
+
+You drive a **headless CLI** that executes the real AutoFactory chain (agents,
+instructions, and models resolved from LaunchDarkly). Your job is chauffeur:
+run it, relay progress, relay approval-gate questions, and summarize. Do NOT
+perform the chain's work yourself — the CLI's agents create the flag, metrics,
+code edits, tests, and manifest.
+
+## Locating the CLI
+
+The CLI lives in a checkout of the `launchdarkly-auto-factory` tooling repo at
+`packages/phase1-cli/dist/cli.js`. Resolve the checkout path in this order:
+
+1. the `AUTOFACTORY_HOME` environment variable;
+2. ask the user where their `launchdarkly-auto-factory` checkout is.
+
+If `packages/phase1-cli/dist/cli.js` is missing, build it first:
+`npm install && npm run build` in the tooling repo.
+
+## Running
+
+Run from the **tooling repo** (its `.env` holds the LaunchDarkly + model keys)
+with `--root` pointing at the user's repo — and run it **in the background**
+(Bash `run_in_background`), never as one long blocking call. The chain takes
+several minutes across 5–6 agents; your job is live narration, not a spinner.
+
+```bash
+cd "$AUTOFACTORY_HOME" && node packages/phase1-cli/dist/cli.js run --root "<absolute path to the user's repo>"
+```
+
+**Progress relay loop:** check the background shell's new output (BashOutput)
+roughly every 30–60 seconds, and after each check tell the user — in one short
+sentence per event, not raw logs — anything new:
+
+- `▶ step N: <agent>` — an agent started ("Step 2: the flag implementer is
+  creating the flag and wiring the code…").
+- `■ step N done: …` — it finished; surface the interesting tags (flag key,
+  metric keys, review verdict), not the whole JSON.
+- `⛊` / `⛔` — a deterministic check passed/failed after a step (⛔ will end
+  the run — explain what it re-derived and why it failed).
+- `⏸` — paused at an approval gate (see below).
+- `⚠` — warnings (config drift, knowledge-graph gaps): mention once, briefly.
+
+Nothing new to report → don't post filler; check again later. When the
+command exits, handle the exit code (below).
+
+Other rules:
+
+- NEVER set the `APPROVAL_MODE` or `RISK_THRESHOLD` environment variables —
+  they silently override the LaunchDarkly approval flags.
+- `--dry-run` gives a read-only preview (no flags created, no edits) if the
+  user asks for one.
+- Don't run other git commands in the user's repo while the chain is running
+  (the agents are editing that working tree).
+
+## Exit codes
+
+| Code | Meaning | What you do |
+|---|---|---|
+| 0 | Reviewer approved, or clean no-op (change needs no flag) | Summarize (below) |
+| 1 | Review REJECTED, chain incomplete, or a deterministic check failed | Summarize; a rejection is a **review verdict, not a pipeline failure** |
+| 2 | Usage/configuration problem (missing env, nothing to process) | Fix or ask the user; don't retry blindly |
+| 3 | **Paused at an approval gate** | See below |
+
+## Approval gates (exit 3)
+
+The chain paused BEFORE a gated step — nothing was created for that step or
+anything after it. The output names the node and prints the exact re-run
+command (`--approve <nodeKey>`, accumulating every previously approved step).
+
+1. Ask the user: approve `<nodeKey>` and continue, or stop here?
+2. On approval, re-run using the printed command (same `cd` + `--root` shape).
+3. On stop, summarize what ran and note the chain is paused; a later re-run
+   with `--approve` resumes it.
+
+Never approve a gate yourself — that decision is the human's.
+
+## Summarizing a finished run
+
+Relay from the CLI's final summary block, verbatim where possible:
+
+- the verdict line;
+- flag and metric links (LaunchDarkly URLs);
+- the manifest path under `.release-flags/`;
+- judge scores, stall or deterministic-check failures if present;
+- the fenced JSON verdict block as-is;
+- remind the user the edits are **uncommitted in their working tree** to
+  review and commit themselves — nothing was pushed. Do not commit them
+  unless the user asks.

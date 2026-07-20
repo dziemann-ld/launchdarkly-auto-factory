@@ -1,0 +1,16 @@
+{
+  "//": "Merge into your app repo's .claude/settings.json (committed — every user of the repo gets the gate). The hook script lives at .claude/hooks/autofactory-gate.mjs.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/autofactory-gate.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}
