@@ -15,7 +15,26 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
-## 2026-07-20
+## 2026-07-20 (later)
+
+### ✅ Fable 5 A/B arm on the implementer + metrics author
+- **New variation `fable-5`** on `autofactory-flag-implementer` and
+  `autofactory-metrics-author`: a mirror of each config's `default` (same
+  instructions, tools, judge attachment) with the model swapped to the global
+  `Anthropic.claude-fable-5` model config (token pricing present, so cost
+  tracking works). Live-only change — variations the bridge doesn't recognize
+  are left alone by `upgrade`, so the arm survives config syncs.
+- **Production targeting** on both configs: fallthrough rollout on the `run`
+  context changed from 50/50 (Sonnet 4.6 / Composer 2.5) to
+  **40% `default` (Sonnet 4.6) / 40% `composer-2-5` / 20% `fable-5`**.
+- **Caveats:** (1) the CLI front end always executes on the Anthropic runner,
+  which cannot serve the `composer-2-5` arm — CLI runs bucketed there fail the
+  node; run the A/B via the GitHub Action on the cursor provider. (2) The
+  `composer-2-5` variations carry drifted instructions (pre-multivariate on the
+  implementer; pre-M12 on the metrics author) and no tool attachments — known
+  drift, reported not overwritten by `upgrade`.
+
+
 
 ### ✅ Metrics author: literal event keys (M12) — instruction hardening from live run
 - **Motivation (live CLI run, `show-free-shipping-nudge`):** the metrics author
