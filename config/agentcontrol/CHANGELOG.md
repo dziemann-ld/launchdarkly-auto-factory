@@ -15,6 +15,35 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-07-21 (Dark Software Factory demo project)
+
+### ✅ New LD project `dark-software-factory` — 25-node AI SDLC graph
+- **Change:** Created a separate LD project (`dark-software-factory`) demonstrating
+  AgentControl as the control/measurement plane for a full "dark software factory."
+  Configs live in `config/darkfactory/`: the 8 existing `autofactory-*` configs
+  (copied, `dark-factory` tag added) plus 17 new `df-*` stations (signal triage,
+  intent research, impact analysis, docs author, synthetic scenario runner, QA
+  verifier, style reviewer, bug scanner, security scanner, dependency auditor,
+  sensitivity classifier, policy guardian, remediation, release approval gate,
+  release manager, canary analyst, experiment analyst, incident responder,
+  knowledge curator). Graph `dark-factory`: 25 nodes / 42 edges — intake fan-out,
+  8-way verification fan-out, approval fan-in, and four loops (tests-failed →
+  implementer, remediation → re-verify, rejected → replan, incident → triage).
+  Provisioned with `bridge provision --ai-configs config/darkfactory/ai-configs
+  --graphs config/darkfactory/graphs --flags config/darkfactory/flags --tools
+  config/agentcontrol/tools`. Node roster informed by dark-factory literature
+  (StrongDM Software Factory, Factory.ai, env.dev playbook, iTmethods, BrainGu).
+- **Monitoring data:** nodes do no real work — `scripts/darkfactory-traffic.mjs`
+  emits realistic `$ld:ai:*` metrics (invocations, duration, errors, tokens, tool
+  calls, graph invocations/paths/handoffs) through the real AI SDK trackers with
+  probabilistic routing. Re-run anytime: `DARKFACTORY_SDK_KEY=... node
+  scripts/darkfactory-traffic.mjs [runs]` (key in `.env`). Verified live: the
+  graph API accepts cyclic edges; per-node metrics confirmed via the ai-configs
+  metrics endpoint (~120 runs emitted 2026-07-21).
+- **Why:** the prototype's linear 6-node graph undersells the graph-view story; a
+  bigger, loopier SDLC shows the monitoring page (invocations / avg duration /
+  error rate / token use) as the factory's control-plane dashboard.
+
 ## 2026-07-20 (provider-aware model routing)
 
 ### ✅ run.provider context attribute + provider-aware A/B rules

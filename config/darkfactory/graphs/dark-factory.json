@@ -1,0 +1,541 @@
+{
+  "key": "dark-factory",
+  "name": "Dark Software Factory",
+  "description": "Full AI SDLC: intake, research, build, 8-way verification, governance, guarded release, operate.",
+  "rootConfigKey": "df-signal-triage",
+  "edges": [
+    {
+      "key": "edge-df-signal-triage-df-intent-researcher",
+      "sourceConfig": "df-signal-triage",
+      "targetConfig": "df-intent-researcher",
+      "handoff": {
+        "max_turns": 12,
+        "request_type": "Fix",
+        "capabilities": [
+          "read_docs",
+          "query_repos"
+        ],
+        "skip_if_tags": {
+          "duplicate": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-signal-triage-df-impact-analyst",
+      "sourceConfig": "df-signal-triage",
+      "targetConfig": "df-impact-analyst",
+      "handoff": {
+        "max_turns": 12,
+        "request_type": "Fix",
+        "capabilities": [
+          "query_repos"
+        ],
+        "skip_if_tags": {
+          "duplicate": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-intent-researcher-autofactory-research-planner",
+      "sourceConfig": "df-intent-researcher",
+      "targetConfig": "autofactory-research-planner",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "read_docs"
+        ]
+      }
+    },
+    {
+      "key": "edge-df-impact-analyst-autofactory-research-planner",
+      "sourceConfig": "df-impact-analyst",
+      "targetConfig": "autofactory-research-planner",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "query_repos"
+        ]
+      }
+    },
+    {
+      "key": "edge-autofactory-research-planner-autofactory-manifest-s",
+      "sourceConfig": "autofactory-research-planner",
+      "targetConfig": "autofactory-manifest-steward",
+      "handoff": {
+        "max_turns": 8,
+        "request_type": "Fix",
+        "capabilities": [
+          "steward_manifest"
+        ],
+        "skip_if_tags": {
+          "skip_flagging": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-autofactory-manifest-steward-autofactory-flag-imple",
+      "sourceConfig": "autofactory-manifest-steward",
+      "targetConfig": "autofactory-flag-implementer",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "create_flag",
+          "flag_state",
+          "edit_files",
+          "write_manifest",
+          "read_docs",
+          "query_repos"
+        ]
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-implementer-autofactory-metrics-au",
+      "sourceConfig": "autofactory-flag-implementer",
+      "targetConfig": "autofactory-metrics-author",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "create_metric",
+          "edit_files",
+          "write_manifest",
+          "read_docs",
+          "query_graph"
+        ],
+        "require_tags": {
+          "flag_ready": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-implementer-df-docs-author",
+      "sourceConfig": "autofactory-flag-implementer",
+      "targetConfig": "df-docs-author",
+      "handoff": {
+        "max_turns": 10,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "flag_ready": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-autofactory-metrics-author-autofactory-flag-testing",
+      "sourceConfig": "autofactory-metrics-author",
+      "targetConfig": "autofactory-flag-testing",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "needs_tests": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-autofactory-flag-implement",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "autofactory-flag-implementer",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "tests_failed": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-autofactory-code-reviewer",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "autofactory-code-reviewer",
+      "handoff": {
+        "max_turns": 30,
+        "request_type": "Fix",
+        "capabilities": [
+          "read_docs"
+        ]
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-df-synthetic-tester",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "df-synthetic-tester",
+      "handoff": {
+        "max_turns": 15,
+        "request_type": "Fix",
+        "capabilities": [
+          "run_scenarios"
+        ]
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-df-qa-verifier",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "df-qa-verifier",
+      "handoff": {
+        "max_turns": 15,
+        "request_type": "Fix",
+        "capabilities": [
+          "run_scenarios"
+        ]
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-df-style-reviewer",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "df-style-reviewer",
+      "handoff": {
+        "max_turns": 8,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-df-bug-hunter",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "df-bug-hunter",
+      "handoff": {
+        "max_turns": 15,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-df-security-scanner",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "df-security-scanner",
+      "handoff": {
+        "max_turns": 15,
+        "request_type": "Fix",
+        "capabilities": [
+          "query_repos"
+        ]
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-df-dependency-auditor",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "df-dependency-auditor",
+      "handoff": {
+        "max_turns": 8,
+        "request_type": "Fix",
+        "capabilities": [
+          "query_repos"
+        ]
+      }
+    },
+    {
+      "key": "edge-autofactory-flag-testing-df-sensitivity-classifier",
+      "sourceConfig": "autofactory-flag-testing",
+      "targetConfig": "df-sensitivity-classifier",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-df-sensitivity-classifier-df-policy-guardian",
+      "sourceConfig": "df-sensitivity-classifier",
+      "targetConfig": "df-policy-guardian",
+      "handoff": {
+        "max_turns": 10,
+        "request_type": "Fix",
+        "capabilities": [
+          "steward_manifest"
+        ]
+      }
+    },
+    {
+      "key": "edge-df-security-scanner-df-policy-guardian",
+      "sourceConfig": "df-security-scanner",
+      "targetConfig": "df-policy-guardian",
+      "handoff": {
+        "max_turns": 10,
+        "request_type": "Fix",
+        "capabilities": [
+          "steward_manifest"
+        ]
+      }
+    },
+    {
+      "key": "edge-df-bug-hunter-df-remediation-agent",
+      "sourceConfig": "df-bug-hunter",
+      "targetConfig": "df-remediation-agent",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "findings": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-security-scanner-df-remediation-agent",
+      "sourceConfig": "df-security-scanner",
+      "targetConfig": "df-remediation-agent",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "findings": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-qa-verifier-df-remediation-agent",
+      "sourceConfig": "df-qa-verifier",
+      "targetConfig": "df-remediation-agent",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "regressions_found": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-autofactory-code-reviewer-df-remediation-agent",
+      "sourceConfig": "autofactory-code-reviewer",
+      "targetConfig": "df-remediation-agent",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "changes_requested": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-synthetic-tester-df-remediation-agent",
+      "sourceConfig": "df-synthetic-tester",
+      "targetConfig": "df-remediation-agent",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "scenario_failures": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-remediation-agent-autofactory-flag-testing",
+      "sourceConfig": "df-remediation-agent",
+      "targetConfig": "autofactory-flag-testing",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ]
+      }
+    },
+    {
+      "key": "edge-autofactory-code-reviewer-df-release-approver",
+      "sourceConfig": "autofactory-code-reviewer",
+      "targetConfig": "df-release-approver",
+      "handoff": {
+        "max_turns": 10,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-df-style-reviewer-df-release-approver",
+      "sourceConfig": "df-style-reviewer",
+      "targetConfig": "df-release-approver",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-df-synthetic-tester-df-release-approver",
+      "sourceConfig": "df-synthetic-tester",
+      "targetConfig": "df-release-approver",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix",
+        "require_tags": {
+          "pass_rate_met": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-qa-verifier-df-release-approver",
+      "sourceConfig": "df-qa-verifier",
+      "targetConfig": "df-release-approver",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-df-dependency-auditor-df-release-approver",
+      "sourceConfig": "df-dependency-auditor",
+      "targetConfig": "df-release-approver",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-df-policy-guardian-df-release-approver",
+      "sourceConfig": "df-policy-guardian",
+      "targetConfig": "df-release-approver",
+      "handoff": {
+        "max_turns": 8,
+        "request_type": "Fix",
+        "capabilities": [
+          "steward_manifest"
+        ]
+      }
+    },
+    {
+      "key": "edge-df-docs-author-df-release-approver",
+      "sourceConfig": "df-docs-author",
+      "targetConfig": "df-release-approver",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-df-release-approver-autofactory-research-planner",
+      "sourceConfig": "df-release-approver",
+      "targetConfig": "autofactory-research-planner",
+      "handoff": {
+        "max_turns": 8,
+        "request_type": "Fix",
+        "require_tags": {
+          "rejected": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-release-approver-df-release-manager",
+      "sourceConfig": "df-release-approver",
+      "targetConfig": "df-release-manager",
+      "handoff": {
+        "max_turns": 15,
+        "request_type": "Fix",
+        "capabilities": [
+          "flag_state",
+          "write_manifest"
+        ],
+        "require_tags": {
+          "approved": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-release-manager-df-canary-analyst",
+      "sourceConfig": "df-release-manager",
+      "targetConfig": "df-canary-analyst",
+      "handoff": {
+        "max_turns": 15,
+        "request_type": "Fix",
+        "capabilities": [
+          "flag_state"
+        ]
+      }
+    },
+    {
+      "key": "edge-df-canary-analyst-df-experiment-analyst",
+      "sourceConfig": "df-canary-analyst",
+      "targetConfig": "df-experiment-analyst",
+      "handoff": {
+        "max_turns": 10,
+        "request_type": "Fix",
+        "capabilities": [
+          "create_metric"
+        ],
+        "require_tags": {
+          "rollout_healthy": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-canary-analyst-df-incident-responder",
+      "sourceConfig": "df-canary-analyst",
+      "targetConfig": "df-incident-responder",
+      "handoff": {
+        "max_turns": 15,
+        "request_type": "Fix",
+        "capabilities": [
+          "flag_state"
+        ],
+        "require_tags": {
+          "regression_detected": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-incident-responder-df-remediation-agent",
+      "sourceConfig": "df-incident-responder",
+      "targetConfig": "df-remediation-agent",
+      "handoff": {
+        "max_turns": 20,
+        "request_type": "Fix",
+        "capabilities": [
+          "edit_files"
+        ],
+        "require_tags": {
+          "hotfix_required": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-incident-responder-df-signal-triage",
+      "sourceConfig": "df-incident-responder",
+      "targetConfig": "df-signal-triage",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix",
+        "require_tags": {
+          "new_signal": "true"
+        }
+      }
+    },
+    {
+      "key": "edge-df-incident-responder-df-knowledge-curator",
+      "sourceConfig": "df-incident-responder",
+      "targetConfig": "df-knowledge-curator",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix"
+      }
+    },
+    {
+      "key": "edge-df-experiment-analyst-df-knowledge-curator",
+      "sourceConfig": "df-experiment-analyst",
+      "targetConfig": "df-knowledge-curator",
+      "handoff": {
+        "max_turns": 6,
+        "request_type": "Fix"
+      }
+    }
+  ]
+}
