@@ -8,6 +8,10 @@ monitoring, gen_ai spans, per-agent models, code-enforced approval gates and
 write ceiling, knowledge-graph and cross-repo tools). Claude Code's role is
 chauffeur: run the CLI, relay progress, relay gate questions, summarize.
 
+**Installing?** Follow the standalone step-by-step guide:
+[INSTALL-CLAUDE-CODE.md](../../INSTALL-CLAUDE-CODE.md). The setup summary below
+covers the same ground; the rest of this file is design detail.
+
 ## Setup (in your app repo)
 
 1. Have a checkout of this tooling repo, bootstrapped per the

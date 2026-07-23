@@ -100,7 +100,10 @@ Next steps (provider: anthropic):
   2. Add repo secrets:    LD_SDK_KEY, ANTHROPIC_API_KEY, LD_API_KEY
      Add repo variable:   LD_APP_PROJECT_KEY  (e.g. autofactory-demo)
      (GITHUB_TOKEN is provided automatically. For Phase 2, also add BEACON_WEBHOOK_SECRET.)
-  3. Open a PR. Phase 1 runs automatically (LLM Observability is on — DISABLE_LD_OBSERVABILITY to opt out).`;
+  3. Open a PR. Phase 1 runs automatically (LLM Observability is on — DISABLE_LD_OBSERVABILITY to opt out).
+
+  Using Claude Code instead of the GitHub Action? Skip the steps above and follow
+  INSTALL-CLAUDE-CODE.md (you're already past step 1).`;
 
 console.log(
   steps +

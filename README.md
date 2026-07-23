@@ -61,7 +61,9 @@ same release manifest — they differ only in trigger, output, and which models 
 | **Native Cursor automation** — [`bootstrap/cursor-automation`](bootstrap/cursor-automation/) | the `/autofactory` command in Cursor | edits left in your working tree | Cursor's own models (no API key) | local prototype; cloud (auto, PR-based) is a later phase |
 | **Headless CLI / Claude Code** — [`packages/phase1-cli`](packages/phase1-cli/), skill in [`bootstrap/claude-code/`](bootstrap/claude-code/) | `autofactory run` in a terminal, or `/autofactory` in Claude Code | edits left in your working tree | Anthropic API only (model per agent from the AI config; the working-tree ceiling requires the sandboxed runner — see the CLI README) | new; full fidelity (judges, monitoring, gates) |
 
-Setup for the GitHub Action is below; the extension, the automation, and the CLI each have their own README.
+Setup for the GitHub Action is below; the extension, the automation, and the CLI each have their
+own README. For the Claude Code path there is a standalone install guide:
+[INSTALL-CLAUDE-CODE.md](INSTALL-CLAUDE-CODE.md).
 
 ## Phase 1 setup (GitHub Action)
 
