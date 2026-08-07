@@ -162,16 +162,32 @@ describe("buildPrSummary — rejected", () => {
   });
 });
 
-describe("buildPrSummary — pipeline failures are not blamed on the author", () => {
-  it("an incomplete run says so and explains how to re-run", () => {
-    const r = buildPrSummary({ ...base, state: "incomplete", reason: "INCOMPLETE" });
-    assert.match(r.comment, /^### ⚠️ AutoFactory — run incomplete$/m);
-    assert.match(r.comment, /re-adding the `autofactory` label/);
+describe("buildPrSummary — failed runs explain themselves above the fold", () => {
+  // The first version said only "see Pipeline details", so the reader had to
+  // expand a collapsed block to learn why the check was red — and it asserted the
+  // failure was the pipeline's fault, which for a red test suite at handoff is a
+  // guess (it can equally be the change or a missing test environment).
+  it("promotes a failed check's reason into the visible body", () => {
+    const detail = "deterministic check failed after 'flag-implementer': [tests-green-at-handoff] the suite was red";
+    const r = buildPrSummary({
+      ...base,
+      state: "verification-failed",
+      reason: "check failed",
+      warnings: { verifyText: detail },
+    });
+    const visible = r.comment.slice(0, r.comment.indexOf("<details"));
+    assert.match(visible, /> deterministic check failed after 'flag-implementer'/);
+    assert.doesNotMatch(r.comment, /not a problem with your code/);
+    // And it isn't repeated inside the collapsed diagnostics.
+    assert.equal(r.comment.split("tests-green-at-handoff").length - 1, 1);
   });
 
-  it("a failed deterministic check is labelled a pipeline problem", () => {
-    const r = buildPrSummary({ ...base, state: "verification-failed", reason: "check failed" });
-    assert.match(r.comment, /This is a pipeline problem, not a problem with your code/);
+  it("promotes a halted run's reason too", () => {
+    const detail = "'research-planner' ended 'stopped' before finishing";
+    const r = buildPrSummary({ ...base, state: "incomplete", reason: "INCOMPLETE", warnings: { truncText: detail } });
+    const visible = r.comment.slice(0, r.comment.indexOf("<details"));
+    assert.match(r.comment, /^### ⚠️ AutoFactory — run incomplete$/m);
+    assert.match(visible, /> 'research-planner' ended 'stopped'/);
   });
 
   it("a missing verdict is not presented as a rejection", () => {

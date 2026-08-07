@@ -40407,10 +40407,13 @@ var HEADLINE = {
 function nextAction(input, counts) {
   const hasPatch = Boolean(input.patchBlock);
   switch (input.state) {
+    // Don't guess whose fault a failed check is — a red suite at handoff can be
+    // the change, the agents' edits, or a missing test environment. State what
+    // failed and let the detail (rendered right below) speak.
     case "verification-failed":
-      return "**Nothing was applied.** A mechanical check on the pipeline's own output failed \u2014 see _Pipeline details_. This is a pipeline problem, not a problem with your code.";
+      return "**Nothing was applied.** A mechanical check on the pipeline's output failed, so the chain stopped before review:";
     case "incomplete":
-      return "**Nothing was applied.** An agent stopped before finishing, so the run was halted instead of continuing on a partial brief. Re-run by removing and re-adding the `autofactory` label; if it recurs, the turn budget needs raising.";
+      return "**Nothing was applied.** An agent stopped before finishing, so the run halted rather than continue on a partial brief:";
     case "no-flag":
       return "No action needed \u2014 this change doesn't need a feature flag, so no flag, metrics, or tests were created.";
     case "no-verdict":
@@ -40459,7 +40462,7 @@ function factRows(input, counts) {
 function countPatchFiles(patchBlock) {
   return (patchBlock.match(/^diff --git /gm) ?? []).length;
 }
-function pipelineDetails(input) {
+function pipelineDetails(input, promoted) {
   const rows = input.runs.map((r) => {
     const judge = input.judgeScores.get(r.configKey);
     const tags = Object.entries(r.tags).map(([k, v]) => `${k}=${v}`).join(", ").slice(0, 140) || "\u2014";
@@ -40468,8 +40471,8 @@ function pipelineDetails(input) {
   });
   const w = input.warnings ?? {};
   const notes = [
-    w.verifyText ? `- **Failed check:** ${w.verifyText}` : "",
-    w.truncText ? `- **Halted:** ${w.truncText}` : "",
+    w.verifyText && w.verifyText !== promoted ? `- **Failed check:** ${w.verifyText}` : "",
+    w.truncText && w.truncText !== promoted ? `- **Halted:** ${w.truncText}` : "",
     w.stallText ? `- **Stalled:** ${w.stallText}` : "",
     w.intentWarning ? `- **Release intent:** ${w.intentWarning}` : "",
     w.configDrift ? `- **Config drift:** ${w.configDrift}` : "",
@@ -40507,17 +40510,20 @@ function buildPrSummary(input) {
   const { icon, title } = HEADLINE[input.state];
   const action = nextAction(input, counts);
   const rows = factRows(input, counts);
+  const w = input.warnings ?? {};
+  const blockingReason = input.state === "verification-failed" ? w.verifyText : input.state === "incomplete" ? w.truncText : void 0;
   const head = [
     `### ${icon} AutoFactory \u2014 ${title}`,
     "",
     action,
+    ...blockingReason ? ["", `> ${blockingReason}`] : [],
     ...rows.length ? ["", "| | |", "|---|---|", ...rows] : []
   ].join("\n");
   const artifacts = [
     input.patchBlock ?? "",
     input.review ? reviewBlock(input.review, counts) : ""
   ].filter(Boolean);
-  const comment = [head, ...artifacts, pipelineDetails(input)].join("\n\n");
+  const comment = [head, ...artifacts, pipelineDetails(input, blockingReason)].join("\n\n");
   return {
     comment,
     checkTitle: `${title.charAt(0).toUpperCase()}${title.slice(1)} \u2014 ${input.reason}`,

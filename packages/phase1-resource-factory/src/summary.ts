@@ -134,10 +134,13 @@ const HEADLINE: Record<RunState, { icon: string; title: string }> = {
 function nextAction(input: SummaryInput, counts: FindingCounts): string {
   const hasPatch = Boolean(input.patchBlock);
   switch (input.state) {
+    // Don't guess whose fault a failed check is — a red suite at handoff can be
+    // the change, the agents' edits, or a missing test environment. State what
+    // failed and let the detail (rendered right below) speak.
     case "verification-failed":
-      return "**Nothing was applied.** A mechanical check on the pipeline's own output failed — see _Pipeline details_. This is a pipeline problem, not a problem with your code.";
+      return "**Nothing was applied.** A mechanical check on the pipeline's output failed, so the chain stopped before review:";
     case "incomplete":
-      return "**Nothing was applied.** An agent stopped before finishing, so the run was halted instead of continuing on a partial brief. Re-run by removing and re-adding the `autofactory` label; if it recurs, the turn budget needs raising.";
+      return "**Nothing was applied.** An agent stopped before finishing, so the run halted rather than continue on a partial brief:";
     case "no-flag":
       return "No action needed — this change doesn't need a feature flag, so no flag, metrics, or tests were created.";
     case "no-verdict":
@@ -200,8 +203,11 @@ function countPatchFiles(patchBlock: string): number {
   return (patchBlock.match(/^diff --git /gm) ?? []).length;
 }
 
-/** The collapsed diagnostics: agent table, warnings, context that was read. */
-function pipelineDetails(input: SummaryInput): string {
+/**
+ * The collapsed diagnostics: agent table, warnings, context that was read.
+ * `promoted` is a reason already shown above the fold — don't repeat it here.
+ */
+function pipelineDetails(input: SummaryInput, promoted?: string): string {
   const rows = input.runs.map((r) => {
     const judge = input.judgeScores.get(r.configKey);
     const tags =
@@ -216,8 +222,8 @@ function pipelineDetails(input: SummaryInput): string {
 
   const w = input.warnings ?? {};
   const notes = [
-    w.verifyText ? `- **Failed check:** ${w.verifyText}` : "",
-    w.truncText ? `- **Halted:** ${w.truncText}` : "",
+    w.verifyText && w.verifyText !== promoted ? `- **Failed check:** ${w.verifyText}` : "",
+    w.truncText && w.truncText !== promoted ? `- **Halted:** ${w.truncText}` : "",
     w.stallText ? `- **Stalled:** ${w.stallText}` : "",
     w.intentWarning ? `- **Release intent:** ${w.intentWarning}` : "",
     w.configDrift ? `- **Config drift:** ${w.configDrift}` : "",
@@ -279,10 +285,18 @@ export function buildPrSummary(input: SummaryInput): RenderedSummary {
   const action = nextAction(input, counts);
   const rows = factRows(input, counts);
 
+  // The reason a run failed is the single most useful thing on the comment, so it
+  // goes ABOVE the fold rather than collapsed with the diagnostics. Previously a
+  // halted run said only "see Pipeline details" and the reader had to expand.
+  const w = input.warnings ?? {};
+  const blockingReason =
+    input.state === "verification-failed" ? w.verifyText : input.state === "incomplete" ? w.truncText : undefined;
+
   const head = [
     `### ${icon} AutoFactory — ${title}`,
     "",
     action,
+    ...(blockingReason ? ["", `> ${blockingReason}`] : []),
     ...(rows.length ? ["", "| | |", "|---|---|", ...rows] : []),
   ].join("\n");
 
@@ -291,7 +305,7 @@ export function buildPrSummary(input: SummaryInput): RenderedSummary {
     input.review ? reviewBlock(input.review, counts) : "",
   ].filter(Boolean);
 
-  const comment = [head, ...artifacts, pipelineDetails(input)].join("\n\n");
+  const comment = [head, ...artifacts, pipelineDetails(input, blockingReason)].join("\n\n");
 
   return {
     comment,
