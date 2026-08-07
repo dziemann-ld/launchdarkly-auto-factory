@@ -1,7 +1,7 @@
 {
   "key": "create_flag",
   "name": "create_flag",
-  "description": "Create a STRING MULTIVARIATE feature flag in LaunchDarkly (the app/data-plane project) with two variations: 'control' (existing behavior — the off-variation, served while the flag is off) and 'v1' (this PR's new behavior). AutoFactory never creates boolean flags: multivariate flags can take iteration variations (v2, v3, …) on follow-up PRs, booleans never can. Wire code by comparing the STRING variation value with a fail-safe default of 'control', e.g. variation(key, ctx, 'control') === 'v1'. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you.",
+  "description": "Create a STRING MULTIVARIATE feature flag in LaunchDarkly (the app/data-plane project) with two variations: 'control' (existing behavior — the off-variation, served while the flag is off) and 'v1' (this PR's new behavior). On this project AutoFactory does not create boolean flags: multivariate flags can take iteration variations (v2, v3, …) on follow-up PRs, booleans never can. Wire code by comparing the STRING variation value with a fail-safe default of 'control', e.g. variation(key, ctx, 'control') === 'v1'. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you.",
   "schema": {
     "type": "object",
     "properties": {

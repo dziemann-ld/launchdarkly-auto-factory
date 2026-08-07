@@ -37676,7 +37676,13 @@ var USE_EXISTING_FLAG_TOOL = {
 };
 var CREATE_METRIC_TOOL = {
   name: "create_metric",
-  description: "Create a guarded-release metric in LaunchDarkly (the app/data-plane project). TWO backings: (1) EVENT-backed (default) \u2014 pass event_key; you must FIRST instrument the matching event in code (a LaunchDarkly `track(event_key, \u2026)` call on the path the flag wraps, via edit_file) so the metric has data once live \u2014 EXCEPTION: event_key `sentry-errors` is fed by the LD\u2194Sentry integration (no track() emitter). Prefer reusing provisioned `sentry-errors-binary` / `sentry-errors-count` via list_metrics when Sentry is present (ADR 0014). (2) TRACE-backed \u2014 pass trace_query (an observability span filter, e.g. service_name=x AND span_name=\"GET /api/y\") INSTEAD of event_key; valid ONLY when the flag is evaluated inside the matched trace (the observability SDK's afterEvaluation hook enriches the span \u2014 see your Metric Backing rules), and requires the service to already emit spans. Latency-category trace metrics measure the span's duration (override with trace_value_location). Idempotent: re-creating an existing key is a no-op. After it succeeds the metrics_created/metric_keys tags are updated for you.",
+  description: (
+    // Kept under 1024 chars: LaunchDarkly's tools library rejects longer
+    // descriptions, which silently blocks provisioning this tool (and any
+    // variation attaching it). Detail that does not fit belongs in the agent's
+    // own instructions, not here.
+    'Create a guarded-release metric in LaunchDarkly (the app/data-plane project). TWO backings: (1) EVENT-backed (default) \u2014 pass event_key, and FIRST instrument the matching `track(event_key, \u2026)` call on the flagged path via edit_file so the metric has data once live. Exception: event_key `sentry-errors` is fed by the LD\u2194Sentry integration and needs no emitter; when Sentry is present prefer reusing the provisioned `sentry-errors-binary` / `sentry-errors-count` via list_metrics (ADR 0014). (2) TRACE-backed \u2014 pass trace_query (a span filter, e.g. service_name=x AND span_name="GET /api/y") INSTEAD of event_key. Valid ONLY when the flag is evaluated inside the matched span (see your Metric Backing rules) and the service already emits spans; latency-category trace metrics measure span duration (override with trace_value_location). Idempotent: re-creating an existing key is a no-op. After it succeeds the metrics_created/metric_keys tags are updated for you.'
+  ),
   input_schema: {
     type: "object",
     properties: {
