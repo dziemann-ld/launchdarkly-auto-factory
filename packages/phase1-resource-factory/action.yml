@@ -61,6 +61,26 @@ inputs:
     description: "Repo path the read-only agent tools inspect. Defaults to the checked-out workspace root."
     required: false
     default: "."
+  apply_mode:
+    description: >-
+      How the agents' code changes land. "commit" (default) commits and pushes them to the PR
+      branch. "propose" leaves them uncommitted and posts the diff on the PR for a human to
+      apply — the whole chain still runs against the real edits.
+    required: false
+    default: "commit"
+  flag_shape:
+    description: >-
+      Shape of newly created flags: "multivariate" (default; string control/v1 variations, so
+      later PRs can add v2, v3) or "boolean" (false/true) for a repo whose flag seam is boolean.
+      LaunchDarkly fixes a flag's kind at creation, so boolean flags cannot take iteration
+      variations later — iterations become child flags.
+    required: false
+    default: "multivariate"
+  test_command:
+    description: >-
+      Override the command `run_tests` executes (e.g. "pnpm -r test"). By default the package
+      manager and script are detected from the repo.
+    required: false
   approval_mode:
     description: "Env OVERRIDE for the auto-factory-approval-mode flag: yolo | risk-threshold | always (legacy middle/manual map to risk-threshold/always). Normally leave unset and control via the flag."
     required: false

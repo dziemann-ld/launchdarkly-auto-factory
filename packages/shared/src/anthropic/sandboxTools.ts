@@ -22,7 +22,7 @@ import { fileNodeId, flagNodeId, serviceNodeId } from "../graph/schema.js";
 import { blastRadius, neighbors } from "../graph/query.js";
 import type { RelatedReposClient } from "../github/relatedRepos.js";
 import { getEstatePicture } from "../sentry/sentryEstate.js";
-import { variationReleased, type LdResourceWriter, type MetricCategory } from "./ldWriter.js";
+import { resolveFlagShape, variationReleased, type LdResourceWriter, type MetricCategory } from "./ldWriter.js";
 import type { ReleaseFlagFile, Scope } from "../types.js";
 
 export interface AnthropicToolDef {
@@ -91,10 +91,27 @@ const READONLY_TOOLS: AnthropicToolDef[] = [
   },
 ];
 
+/**
+ * `create_flag`'s description has to state the shape the tool will ACTUALLY
+ * create (see FlagShape / AUTOFACTORY_FLAG_SHAPE) — an agent told "always
+ * multivariate" on a boolean-configured project writes string comparisons against
+ * a flag whose variations are true/false.
+ */
+const CREATE_FLAG_DESCRIPTION_MULTIVARIATE =
+  "Create a STRING MULTIVARIATE feature flag in LaunchDarkly (the app/data-plane project) with two variations: 'control' (existing behavior — the off-variation, served while the flag is off) and 'v1' (this PR's new behavior). On this project AutoFactory does not create boolean flags: multivariate flags can take iteration variations (v2, v3, …) on follow-up PRs, booleans never can. Wire code by comparing the STRING variation value with a fail-safe default of 'control', e.g. variation(key, ctx, 'control') === 'v1'. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you.";
+
+const CREATE_FLAG_DESCRIPTION_BOOLEAN =
+  "Create a BOOLEAN feature flag in LaunchDarkly (the app/data-plane project) with variations false (existing behavior — the off-variation, served while the flag is off) and true (this PR's new behavior). This project is configured for boolean flags because its codebase evaluates flags through a boolean seam; wire code with the repo's existing boolean flag helper and a fail-safe default of false, matching how the repo's other flags are evaluated. Do NOT invent a string/multivariate evaluation. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you. Note: LaunchDarkly fixes a flag's kind at creation, so add_variation will not work on these flags — a later iteration on released behavior needs a child flag with this one as prerequisite.";
+
+/** `create_flag` described for the shape this run will actually create. */
+function createFlagToolForShape(): AnthropicToolDef {
+  if (resolveFlagShape() !== "boolean") return CREATE_FLAG_TOOL;
+  return { ...CREATE_FLAG_TOOL, description: CREATE_FLAG_DESCRIPTION_BOOLEAN };
+}
+
 const CREATE_FLAG_TOOL: AnthropicToolDef = {
   name: "create_flag",
-  description:
-    "Create a STRING MULTIVARIATE feature flag in LaunchDarkly (the app/data-plane project) with two variations: 'control' (existing behavior — the off-variation, served while the flag is off) and 'v1' (this PR's new behavior). AutoFactory never creates boolean flags: multivariate flags can take iteration variations (v2, v3, …) on follow-up PRs, booleans never can. Wire code by comparing the STRING variation value with a fail-safe default of 'control', e.g. variation(key, ctx, 'control') === 'v1'. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you.",
+  description: CREATE_FLAG_DESCRIPTION_MULTIVARIATE,
   input_schema: {
     type: "object",
     properties: {
@@ -524,7 +541,10 @@ export function buildSandboxTools(caps: ToolCapabilities): AnthropicToolDef[] {
   if (caps.querySentry) tools.push(QUERY_SENTRY_TOOL);
   if (caps.queryRepos) tools.push(QUERY_RELATED_REPOS_TOOL);
   if (caps.flagState) tools.push(GET_FLAG_STATE_TOOL);
-  if (caps.createFlag) tools.push(CREATE_FLAG_TOOL, ADD_VARIATION_TOOL, USE_EXISTING_FLAG_TOOL);
+  // Resolved per run, not at import: the shape can arrive as an action input that
+  // is mapped into the environment after this module loads. SANDBOX_TOOL_DEFS
+  // keeps the canonical multivariate default (it is the committed registry).
+  if (caps.createFlag) tools.push(createFlagToolForShape(), ADD_VARIATION_TOOL, USE_EXISTING_FLAG_TOOL);
   if (caps.createMetric) tools.push(CREATE_METRIC_TOOL, LIST_METRICS_TOOL);
   if (caps.writeManifest || caps.stewardManifest) tools.push(WRITE_MANIFEST_TOOL);
   if (caps.editFiles) tools.push(WRITE_FILE_TOOL, EDIT_FILE_TOOL, RUN_TESTS_TOOL, COMMIT_PUSH_TOOL);

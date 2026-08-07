@@ -110,8 +110,17 @@ function createAgentRunner(provider: string, kg?: AssembledGraph): AgentRunner {
   const sandboxRoot = resolve(process.env.SANDBOX_ROOT ?? "examples/demo-app");
   const writer = flagCreationWriter();
   const codeChangesEnabled = process.env.ENABLE_CODE_CHANGES === "true";
+  const propose = proposeMode();
   console.log(`Flag creation: ${writer ? `ENABLED → app project '${writer.projectKey}'` : "disabled"}.`);
-  console.log(`Code changes (edit + commit/push): ${codeChangesEnabled ? "ENABLED" : "disabled"}.`);
+  console.log(
+    `Code changes: ${
+      !codeChangesEnabled
+        ? "disabled"
+        : propose
+          ? "PROPOSE — agents edit the checkout, nothing is committed; the diff is posted for a human to apply"
+          : "ENABLED (edit + commit/push)"
+    }.`,
+  );
   // Cross-repo research (split-repo estates): the app repo opts in by
   // registering relatedRepos in .autofactory/services.yaml. AUTOFACTORY_REPOS_TOKEN
   // overrides the default token for private sibling repos.
@@ -126,6 +135,11 @@ function createAgentRunner(provider: string, kg?: AssembledGraph): AgentRunner {
   const localOpts = {
     sandboxRoot,
     codeChangesEnabled,
+    // Propose mode reuses the Cursor extension's git mode: the agents edit the
+    // checkout so the whole chain still works on real code (metrics instrument it,
+    // tests exercise it, the reviewer reads it), but nothing is committed or
+    // pushed. The action posts the resulting diff for a human to apply.
+    ...(propose ? { gitMode: "workingTree" as const } : {}),
     ...(writer ? { writer } : {}),
     ...(process.env.PR_BRANCH ? { prBranch: process.env.PR_BRANCH } : {}),
     ...(process.env.PR_BASE_REF ? { prBaseRef: process.env.PR_BASE_REF } : {}),
@@ -314,6 +328,54 @@ function buildGateComment(gatedSteps: string[], approved: Set<string>, pendingNo
 /** GitHub rejects comment bodies over 65536 chars; leave room for the summary. */
 const REVIEW_BODY_LIMIT = 55_000;
 
+/** Room for the proposed patch when it shares the comment with the review. */
+const PATCH_BODY_LIMIT = 30_000;
+
+/**
+ * Propose mode: agents edit the checkout so the chain works on real code, but
+ * nothing is committed or pushed — the action posts the diff for a human to apply.
+ *
+ * Why offer it: the reference repo's own governing ADR is "AI drafts, humans
+ * approve", and auto-committed flag wiring has landed defects a human would have
+ * caught (dead branches, a flag read into a `useState` initializer that never
+ * re-reads). Proposing keeps the pipeline's analysis while leaving control-flow
+ * edits to a person.
+ */
+function proposeMode(): boolean {
+  const v = (process.env.AUTOFACTORY_APPLY_MODE ?? "").toLowerCase();
+  return v === "propose" || v === "suggest";
+}
+
+/**
+ * The uncommitted diff the agents left in the checkout, rendered for the PR.
+ * Returns "" when nothing changed (or the checkout can't be read).
+ */
+function proposedPatch(root: string): string {
+  let diff = "";
+  try {
+    execFileSync("git", ["add", "-A", "--intent-to-add"], { cwd: root, stdio: "ignore" });
+    diff = execFileSync("git", ["diff", "HEAD"], { cwd: root, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }).trim();
+  } catch (e) {
+    console.warn(`Could not read the proposed diff (non-fatal): ${e instanceof Error ? e.message : e}`);
+    return "";
+  }
+  if (!diff) return "";
+  const clipped =
+    diff.length > PATCH_BODY_LIMIT
+      ? `${diff.slice(0, PATCH_BODY_LIMIT)}\n\n[truncated — the full patch is in the Actions log]`
+      : diff;
+  return [
+    "<details>",
+    "<summary><b>Proposed changes</b> — not committed; apply with <code>git apply</code></summary>",
+    "",
+    "```diff",
+    clipped,
+    "```",
+    "",
+    "</details>",
+  ].join("\n");
+}
+
 /**
  * Render the code reviewer's actual findings for the PR comment / check run.
  *
@@ -366,6 +428,9 @@ function mapActionInputs(): void {
   set("SANDBOX_ROOT", "sandbox_root");
   set("ENABLE_FLAG_CREATION", "enable_flag_creation");
   set("ENABLE_CODE_CHANGES", "enable_code_changes");
+  set("AUTOFACTORY_APPLY_MODE", "apply_mode");
+  set("AUTOFACTORY_FLAG_SHAPE", "flag_shape");
+  set("AUTOFACTORY_TEST_COMMAND", "test_command");
   set("PR_BRANCH", "pr_branch");
   set("PR_BASE_REF", "pr_base");
   set("APPROVAL_MODE", "approval_mode");
@@ -701,7 +766,10 @@ async function main(): Promise<void> {
   // anyway. Kept collapsed so the summary stays scannable, and the reviewer's
   // findings are separated from the pipeline's own notes about itself.
   const reviewBody = reviewFindings(walk.runs);
-  const commentBody = reviewBody ? `${summary}\n\n${reviewBody}` : summary;
+  // In propose mode the agents' work is uncommitted, so the patch IS the
+  // deliverable — it goes in the comment alongside the review.
+  const patchBody = proposeMode() ? proposedPatch(sandboxRoot) : "";
+  const commentBody = [summary, patchBody, reviewBody].filter(Boolean).join("\n\n");
   await postPrComment(commentBody, { prNumber: context.PR_NUMBER, repo: context.REPO });
 
   // Always post the verdict as a named check run, attached to the POST-chain

@@ -15,6 +15,87 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-08-07 (fork: tuned for proj-launchpad / `enablement-launchpad`)
+
+Fork-only (`dziemann-ld/launchdarkly-auto-factory`). Driven by the first two live
+runs against `proj-launchpad` (PRs #22 and #26), where the reviews rejected on
+findings about the pipeline rather than the code.
+
+### ✅ Every agent now receives the target repo's own conventions
+- **Why:** the chain had no repo context — the implementer declared "no test
+  runner configured" in a repo with two CI-gated Vitest suites, and the metrics
+  author generated flag-namespaced event keys in a repo that mandates
+  feature-namespaced ones. Generic instructions and a repo's real standard
+  routinely conflict, and the agent had no basis to choose.
+- **Runtime:** `repoProfile.ts` reads `.autofactory/profile.md`, `CLAUDE.md`,
+  `AGENTS.md`, `docs/TESTING.md` and `.cursor/rules/*` from the checkout; the
+  walker injects them ahead of the PR header on EVERY node (a stable, cacheable
+  prefix) with an explicit precedence rule: the repo outranks the agent's own
+  instructions. `AUTOFACTORY_PROFILE=off` disables it.
+
+### ✅ Code reviewer: review the change, not the pipeline
+- **Why:** on PR #22 all five findings were about the agents' own output and none
+  about the author's code; one blocking finding misattributed a manifest field to
+  the wrong agent. Deterministic handoff shims already own pipeline correctness.
+- **Instructions:** R09 (agent-introduced issues) REMOVED, with an explicit
+  "what is NOT your job" section pointing at the shims. New **R00** checks the
+  change against the repo's documented conventions (cite the rule). Flag-wiring
+  and instrumentation review survive as R04/R05, framed as code rather than as
+  agent grading. Dropped the miscalibrated generic rules: duplication-across-files,
+  cyclomatic-complexity-15, and blocking on `any` (CI already enforces it).
+  R01 gained the failure classes seen live (absent-vs-invalid validation,
+  values captured in an initializer that never re-reads).
+- **Output is now markdown, not JSON** — the review is published verbatim on the
+  PR, so it has to read as a review. The machine verdict stays in the tags.
+
+### ✅ Flag shape is configurable; boolean for this estate
+- **Why:** core creates string multivariate flags and blocks boolean-helper
+  evaluation as an R01-grade bug, but `proj-launchpad` is boolean end to end
+  (`boolVariation`, `CLIENT_EXPOSED_FLAG_KEYS`) with six live boolean flags.
+  Multivariate would be a deliberate migration with its own ADR, not a PR-bot
+  decision.
+- **Runtime:** `AUTOFACTORY_FLAG_SHAPE` (`multivariate` default | `boolean`) —
+  `create_flag` builds the shape, states it in its result, and its tool
+  description is swapped to match. Index 0 stays the control in both shapes.
+- **Instructions:** the implementer no longer asserts "multivariate always"; it
+  reads the shape back from `create_flag` and wires the repo's own seam.
+
+### ✅ Flag implementer: propose-only
+- **Why:** `proj-launchpad`'s own ADR-0005 is "AI drafts, humans approve", and
+  auto-committed wiring landed a dead branch and a flag read into a `useState`
+  initializer that never re-reads.
+- **Runtime:** `apply_mode: propose` runs the agents in the extension's
+  `workingTree` git mode — they still edit real code (so metrics, tests and the
+  review all work), nothing is committed, and the action posts the diff on the PR.
+- **Instructions:** `commit_and_push` reporting "left uncommitted for review" is
+  SUCCESS; report `commit_sha: null` and do not retry.
+
+### ✅ Metrics author: repo naming convention wins
+- Checks the conventions block for a documented event/metric naming convention
+  and follows it (feature-namespaced where the repo says so), falling back to
+  `<flag-key>-<category>`. Prefers the repo's own emit helpers over calling the
+  SDK directly, since those carry the context the randomization unit depends on.
+
+### ✅ Chain no longer degrades silently on a truncated node
+- **Why:** `max_turns` is read from the INBOUND handoff and the root has none, so
+  the research planner fell back to the runner's default of 12 and stopped
+  mid-sentence — and that fragment became the next agent's entire prompt. On
+  PR #22 five of six nodes ended `stopped` and four ran with no brief at all.
+- **Runtime:** root gets an explicit budget (`AUTOFACTORY_ROOT_MAX_TURNS`,
+  default 30); an unfinished node HALTS the walk and reports INCOMPLETE instead
+  of forwarding a partial brief.
+
+### ✅ Review findings reach the human; run_tests understands pnpm
+- The reviewer's findings are posted in the PR comment and the check run's detail
+  pane. Previously only a verdict and a tag table were published and the reasoning
+  stayed in the Actions log — a real production bug found on PR #26 merged anyway.
+- `run_tests` resolves the package manager from `packageManager`/lockfile, falls
+  back to per-workspace suites when the root has no `test` script, and honors
+  `AUTOFACTORY_TEST_COMMAND`. It previously ran `npm install && npm test` against
+  a pnpm workspace and reported "no recognized test setup".
+
+---
+
 ## 2026-07-29 (Sentry path → `sentry` variation; review patch)
 
 ### ✅ Metrics author: Sentry moved to a dedicated variation

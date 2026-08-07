@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 
 import {
   LdResourceWriter,
@@ -44,7 +44,9 @@ describe("LdResourceWriter.createFlag (multivariate)", () => {
     assert.equal(r.alreadyExists, false);
     assert.equal(r.key, "enable-x");
     assert.equal(r.variation, "v1");
-    assert.match(r.detail, /Created multivariate flag 'enable-x'/);
+    assert.match(r.detail, /Created MULTIVARIATE flag 'enable-x'/);
+    // The detail tells the agent how to wire what was actually created.
+    assert.match(r.detail, /STRING comparison against 'v1'/);
   });
 
   it("reports alreadyExists on 409 (idempotent re-run)", async () => {
@@ -99,6 +101,51 @@ describe("LdResourceWriter.createFlag (multivariate)", () => {
     assert.deepEqual(patch()?.instructions, [
       { kind: "turnOnClientSideAvailability", value: "usingEnvironmentId" },
     ]);
+  });
+});
+
+/**
+ * AUTOFACTORY_FLAG_SHAPE=boolean is for a repo whose flag seam is boolean end to
+ * end. The invariant that must hold in BOTH shapes: index 0 is the control and
+ * the flag is created serving it, so flag-off preserves existing behavior.
+ */
+describe("LdResourceWriter.createFlag (boolean shape)", () => {
+  afterEach(() => {
+    delete process.env.AUTOFACTORY_FLAG_SHAPE;
+  });
+
+  it("creates false/true variations with control off, and says how to wire it", async () => {
+    process.env.AUTOFACTORY_FLAG_SHAPE = "boolean";
+    const { client, body } = fakeClient(201);
+    const r = await new LdResourceWriter(client).createFlag({ key: "enable-x" });
+    assert.deepEqual(
+      (body()?.variations as Array<{ value: unknown }>).map((v) => v.value),
+      [false, true],
+    );
+    // Off serves index 0 (false = existing behavior) in both shapes.
+    assert.deepEqual(body()?.defaults, { onVariation: 1, offVariation: 0 });
+    assert.equal(r.variation, "true");
+    assert.match(r.detail, /Created BOOLEAN flag 'enable-x'/);
+    assert.match(r.detail, /boolean flag helper, fail-safe default false/);
+  });
+
+  it("still defaults to multivariate when the env var is absent or unrecognized", async () => {
+    process.env.AUTOFACTORY_FLAG_SHAPE = "something-else";
+    const { client, body } = fakeClient(201);
+    const r = await new LdResourceWriter(client).createFlag({ key: "enable-x" });
+    assert.deepEqual(
+      (body()?.variations as Array<{ value: unknown }>).map((v) => v.value),
+      ["control", "v1"],
+    );
+    assert.equal(r.variation, "v1");
+  });
+
+  it("keeps the standard tags and temporary flag in boolean shape", async () => {
+    process.env.AUTOFACTORY_FLAG_SHAPE = "boolean";
+    const { client, body } = fakeClient(201);
+    await new LdResourceWriter(client).createFlag({ key: "k", tags: ["custom"] });
+    assert.equal(body()?.temporary, true);
+    assert.deepEqual(body()?.tags, ["auto-factory", "auto-generated", "custom"]);
   });
 });
 

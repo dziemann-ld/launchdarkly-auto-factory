@@ -37069,6 +37069,9 @@ async function getEstatePicture(opts = {}) {
 // ../shared/dist/anthropic/ldWriter.js
 var CONTROL_VARIATION = "control";
 var VN_RE2 = /^v(\d+)$/;
+function resolveFlagShape() {
+  return (process.env.AUTOFACTORY_FLAG_SHAPE ?? "").toLowerCase() === "boolean" ? "boolean" : "multivariate";
+}
 function nextVariationValue(values) {
   let max = 0;
   for (const v of values) {
@@ -37181,35 +37184,40 @@ var LdResourceWriter = class {
     return this.ld.projectKey;
   }
   /**
-   * Create a STRING MULTIVARIATE feature flag following the AutoFactory
-   * convention: temporary, variations `control` (off-variation, existing
-   * behavior) + `v1` (treatment), created dark. Multivariate from day one is
-   * deliberate — LaunchDarkly fixes a flag's kind at creation, so only flags
-   * born multivariate can take `v2`, `v3`, … iteration variations later.
+   * Create a temporary feature flag, dark, whose OFF variation preserves existing
+   * behavior.
+   *
+   * Shape follows AUTOFACTORY_FLAG_SHAPE (see FlagShape):
+   *  - `multivariate` (default): string variations `control` + `v1`. Multivariate
+   *    from day one is deliberate — LaunchDarkly fixes a flag's kind at creation,
+   *    so only flags born multivariate can take `v2`, `v3`, … iterations later.
+   *  - `boolean`: variations `false` (control) + `true` (treatment), for a repo
+   *    whose flag seam is boolean.
+   *
+   * Either way index 0 is the control and the flag is created serving it.
    */
   async createFlag(args) {
     if (!args.key)
       throw new Error("flag key is required");
     const clientSide = scopeNeedsClientSide(args.scope);
+    const shape = resolveFlagShape();
+    const treatmentDescription = args.treatmentDescription || "New behavior introduced by this PR.";
+    const controlDescription = "Existing behavior \u2014 served while the flag is off (safe default).";
+    const variations = shape === "boolean" ? [
+      { value: false, name: "Control", description: controlDescription },
+      { value: true, name: "Treatment", description: treatmentDescription }
+    ] : [
+      { value: CONTROL_VARIATION, name: "Control", description: controlDescription },
+      { value: "v1", name: "v1", description: treatmentDescription }
+    ];
     const body = {
       key: args.key,
       name: args.name || args.key,
       ...args.description ? { description: args.description } : {},
       temporary: true,
       tags: dedupe(["auto-factory", "auto-generated", ...args.tags ?? []]),
-      variations: [
-        {
-          value: CONTROL_VARIATION,
-          name: "Control",
-          description: "Existing behavior \u2014 served while the flag is off (safe default)."
-        },
-        {
-          value: "v1",
-          name: "v1",
-          description: args.treatmentDescription || "New behavior introduced by this PR."
-        }
-      ],
-      // On = v1 (index 1); Off = control (index 0) — flag-off preserves existing behavior.
+      variations,
+      // On = treatment (index 1); Off = control (index 0) — flag-off preserves existing behavior.
       defaults: { onVariation: 1, offVariation: 0 },
       ...clientSide ? { clientSideAvailability: { usingEnvironmentId: true, usingMobileKey: false } } : {}
     };
@@ -37219,12 +37227,15 @@ var LdResourceWriter = class {
       await this.ensureClientSideAvailability(args.key);
     }
     const clientSideNote = clientSide ? " Client-side SDK availability enabled." : "";
+    const treatmentValue = shape === "boolean" ? "true" : "v1";
+    const shapeNote = shape === "boolean" ? `BOOLEAN flag '${args.key}' (false = control, true = treatment; dark)` : `MULTIVARIATE flag '${args.key}' (control + v1, dark)`;
+    const wiringNote = shape === "boolean" ? " Wire it with the repo's boolean flag helper, fail-safe default false." : " Wire it as a STRING comparison against 'v1', fail-safe default 'control' \u2014 never through a boolean helper.";
     return {
       created: !alreadyExists,
       alreadyExists,
       key: args.key,
-      variation: "v1",
-      detail: alreadyExists ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).${clientSideNote}` : `Created multivariate flag '${args.key}' (control + v1, dark) in project '${this.ld.projectKey}'.${clientSideNote}`
+      variation: treatmentValue,
+      detail: alreadyExists ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).${clientSideNote}` : `Created ${shapeNote} in project '${this.ld.projectKey}'.${clientSideNote}${wiringNote}`
     };
   }
   /**
@@ -37583,9 +37594,16 @@ var READONLY_TOOLS = [
     }
   }
 ];
+var CREATE_FLAG_DESCRIPTION_MULTIVARIATE = "Create a STRING MULTIVARIATE feature flag in LaunchDarkly (the app/data-plane project) with two variations: 'control' (existing behavior \u2014 the off-variation, served while the flag is off) and 'v1' (this PR's new behavior). On this project AutoFactory does not create boolean flags: multivariate flags can take iteration variations (v2, v3, \u2026) on follow-up PRs, booleans never can. Wire code by comparing the STRING variation value with a fail-safe default of 'control', e.g. variation(key, ctx, 'control') === 'v1'. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you.";
+var CREATE_FLAG_DESCRIPTION_BOOLEAN = "Create a BOOLEAN feature flag in LaunchDarkly (the app/data-plane project) with variations false (existing behavior \u2014 the off-variation, served while the flag is off) and true (this PR's new behavior). This project is configured for boolean flags because its codebase evaluates flags through a boolean seam; wire code with the repo's existing boolean flag helper and a fail-safe default of false, matching how the repo's other flags are evaluated. Do NOT invent a string/multivariate evaluation. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you. Note: LaunchDarkly fixes a flag's kind at creation, so add_variation will not work on these flags \u2014 a later iteration on released behavior needs a child flag with this one as prerequisite.";
+function createFlagToolForShape() {
+  if (resolveFlagShape() !== "boolean")
+    return CREATE_FLAG_TOOL;
+  return { ...CREATE_FLAG_TOOL, description: CREATE_FLAG_DESCRIPTION_BOOLEAN };
+}
 var CREATE_FLAG_TOOL = {
   name: "create_flag",
-  description: "Create a STRING MULTIVARIATE feature flag in LaunchDarkly (the app/data-plane project) with two variations: 'control' (existing behavior \u2014 the off-variation, served while the flag is off) and 'v1' (this PR's new behavior). AutoFactory never creates boolean flags: multivariate flags can take iteration variations (v2, v3, \u2026) on follow-up PRs, booleans never can. Wire code by comparing the STRING variation value with a fail-safe default of 'control', e.g. variation(key, ctx, 'control') === 'v1'. Idempotent: re-creating an existing key is a no-op. For frontend/fullstack scopes, client-side SDK availability is enabled automatically so browser apps can evaluate the flag. After it succeeds, the flag_ready/flag_created/flag_key/flag_variation tags are set for you.",
+  description: CREATE_FLAG_DESCRIPTION_MULTIVARIATE,
   input_schema: {
     type: "object",
     properties: {
@@ -37918,7 +37936,7 @@ function buildSandboxTools(caps) {
   if (caps.flagState)
     tools.push(GET_FLAG_STATE_TOOL);
   if (caps.createFlag)
-    tools.push(CREATE_FLAG_TOOL, ADD_VARIATION_TOOL, USE_EXISTING_FLAG_TOOL);
+    tools.push(createFlagToolForShape(), ADD_VARIATION_TOOL, USE_EXISTING_FLAG_TOOL);
   if (caps.createMetric)
     tools.push(CREATE_METRIC_TOOL, LIST_METRICS_TOOL);
   if (caps.writeManifest || caps.stewardManifest)
@@ -40378,8 +40396,11 @@ function createAgentRunner(provider, kg) {
   const sandboxRoot = resolve7(process.env.SANDBOX_ROOT ?? "examples/demo-app");
   const writer = flagCreationWriter();
   const codeChangesEnabled = process.env.ENABLE_CODE_CHANGES === "true";
+  const propose = proposeMode();
   console.log(`Flag creation: ${writer ? `ENABLED \u2192 app project '${writer.projectKey}'` : "disabled"}.`);
-  console.log(`Code changes (edit + commit/push): ${codeChangesEnabled ? "ENABLED" : "disabled"}.`);
+  console.log(
+    `Code changes: ${!codeChangesEnabled ? "disabled" : propose ? "PROPOSE \u2014 agents edit the checkout, nothing is committed; the diff is posted for a human to apply" : "ENABLED (edit + commit/push)"}.`
+  );
   const relatedRepos = loadRelatedRepos(sandboxRoot);
   const reposToken = process.env.AUTOFACTORY_REPOS_TOKEN || process.env.GITHUB_TOKEN;
   if (relatedRepos.length > 0) {
@@ -40390,6 +40411,11 @@ function createAgentRunner(provider, kg) {
   const localOpts = {
     sandboxRoot,
     codeChangesEnabled,
+    // Propose mode reuses the Cursor extension's git mode: the agents edit the
+    // checkout so the whole chain still works on real code (metrics instrument it,
+    // tests exercise it, the reviewer reads it), but nothing is committed or
+    // pushed. The action posts the resulting diff for a human to apply.
+    ...propose ? { gitMode: "workingTree" } : {},
     ...writer ? { writer } : {},
     ...process.env.PR_BRANCH ? { prBranch: process.env.PR_BRANCH } : {},
     ...process.env.PR_BASE_REF ? { prBaseRef: process.env.PR_BASE_REF } : {},
@@ -40510,6 +40536,35 @@ function buildGateComment(gatedSteps, approved, pendingNode) {
   ].join("\n");
 }
 var REVIEW_BODY_LIMIT = 55e3;
+var PATCH_BODY_LIMIT = 3e4;
+function proposeMode() {
+  const v = (process.env.AUTOFACTORY_APPLY_MODE ?? "").toLowerCase();
+  return v === "propose" || v === "suggest";
+}
+function proposedPatch(root) {
+  let diff = "";
+  try {
+    execFileSync4("git", ["add", "-A", "--intent-to-add"], { cwd: root, stdio: "ignore" });
+    diff = execFileSync4("git", ["diff", "HEAD"], { cwd: root, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }).trim();
+  } catch (e) {
+    console.warn(`Could not read the proposed diff (non-fatal): ${e instanceof Error ? e.message : e}`);
+    return "";
+  }
+  if (!diff) return "";
+  const clipped = diff.length > PATCH_BODY_LIMIT ? `${diff.slice(0, PATCH_BODY_LIMIT)}
+
+[truncated \u2014 the full patch is in the Actions log]` : diff;
+  return [
+    "<details>",
+    "<summary><b>Proposed changes</b> \u2014 not committed; apply with <code>git apply</code></summary>",
+    "",
+    "```diff",
+    clipped,
+    "```",
+    "",
+    "</details>"
+  ].join("\n");
+}
 function reviewFindings(runs) {
   const review = runs.find((r) => r.configKey.includes("code-review"));
   const body = review?.output?.trim();
@@ -40549,6 +40604,9 @@ function mapActionInputs() {
   set("SANDBOX_ROOT", "sandbox_root");
   set("ENABLE_FLAG_CREATION", "enable_flag_creation");
   set("ENABLE_CODE_CHANGES", "enable_code_changes");
+  set("AUTOFACTORY_APPLY_MODE", "apply_mode");
+  set("AUTOFACTORY_FLAG_SHAPE", "flag_shape");
+  set("AUTOFACTORY_TEST_COMMAND", "test_command");
   set("PR_BRANCH", "pr_branch");
   set("PR_BASE_REF", "pr_base");
   set("APPROVAL_MODE", "approval_mode");
@@ -40760,9 +40818,8 @@ async function main() {
     ...agentRows.length ? agentRows : ["| (none ran) | \u2014 | \u2014 | \u2014 |"]
   ].filter(Boolean).join("\n");
   const reviewBody = reviewFindings(walk2.runs);
-  const commentBody = reviewBody ? `${summary}
-
-${reviewBody}` : summary;
+  const patchBody = proposeMode() ? proposedPatch(sandboxRoot) : "";
+  const commentBody = [summary, patchBody, reviewBody].filter(Boolean).join("\n\n");
   await postPrComment(commentBody, { prNumber: context.PR_NUMBER, repo: context.REPO });
   await postCheckRun({
     name: "AutoFactory \u2014 Phase 1",

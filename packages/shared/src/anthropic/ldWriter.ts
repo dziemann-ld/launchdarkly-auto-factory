@@ -24,6 +24,28 @@ import type { Scope } from "../types.js";
 export const CONTROL_VARIATION = "control";
 const VN_RE = /^v(\d+)$/;
 
+/**
+ * Shape new flags are created with.
+ *
+ * `multivariate` (the default, and the convention above) is right for an estate
+ * that wants iteration variations. `boolean` exists for a repo whose flag seam is
+ * boolean end to end: forcing multivariate flags into it means either extending
+ * the seam or — the failure mode the reviewer blocks on — evaluating a string
+ * flag through a boolean helper, where every variation is truthy and the control
+ * path can never run. A repo with live boolean flags and a `boolVariation` helper
+ * is better served by matching it; moving to multivariate is a deliberate
+ * migration, not something a PR bot should decide.
+ *
+ * Set per repo with AUTOFACTORY_FLAG_SHAPE. Note LaunchDarkly fixes a flag's kind
+ * at creation, so `boolean` also forecloses `add_variation` on these flags —
+ * iterations become child flags instead.
+ */
+export type FlagShape = "multivariate" | "boolean";
+
+export function resolveFlagShape(): FlagShape {
+  return (process.env.AUTOFACTORY_FLAG_SHAPE ?? "").toLowerCase() === "boolean" ? "boolean" : "multivariate";
+}
+
 /** Next value in the vN lineage given the existing variation values. */
 export function nextVariationValue(values: unknown[]): string {
   let max = 0;
@@ -296,34 +318,42 @@ export class LdResourceWriter {
   }
 
   /**
-   * Create a STRING MULTIVARIATE feature flag following the AutoFactory
-   * convention: temporary, variations `control` (off-variation, existing
-   * behavior) + `v1` (treatment), created dark. Multivariate from day one is
-   * deliberate — LaunchDarkly fixes a flag's kind at creation, so only flags
-   * born multivariate can take `v2`, `v3`, … iteration variations later.
+   * Create a temporary feature flag, dark, whose OFF variation preserves existing
+   * behavior.
+   *
+   * Shape follows AUTOFACTORY_FLAG_SHAPE (see FlagShape):
+   *  - `multivariate` (default): string variations `control` + `v1`. Multivariate
+   *    from day one is deliberate — LaunchDarkly fixes a flag's kind at creation,
+   *    so only flags born multivariate can take `v2`, `v3`, … iterations later.
+   *  - `boolean`: variations `false` (control) + `true` (treatment), for a repo
+   *    whose flag seam is boolean.
+   *
+   * Either way index 0 is the control and the flag is created serving it.
    */
   async createFlag(args: CreateFlagArgs): Promise<LdWriteResult & { variation: string }> {
     if (!args.key) throw new Error("flag key is required");
     const clientSide = scopeNeedsClientSide(args.scope);
+    const shape = resolveFlagShape();
+    const treatmentDescription = args.treatmentDescription || "New behavior introduced by this PR.";
+    const controlDescription = "Existing behavior — served while the flag is off (safe default).";
+    const variations =
+      shape === "boolean"
+        ? [
+            { value: false, name: "Control", description: controlDescription },
+            { value: true, name: "Treatment", description: treatmentDescription },
+          ]
+        : [
+            { value: CONTROL_VARIATION, name: "Control", description: controlDescription },
+            { value: "v1", name: "v1", description: treatmentDescription },
+          ];
     const body = {
       key: args.key,
       name: args.name || args.key,
       ...(args.description ? { description: args.description } : {}),
       temporary: true,
       tags: dedupe(["auto-factory", "auto-generated", ...(args.tags ?? [])]),
-      variations: [
-        {
-          value: CONTROL_VARIATION,
-          name: "Control",
-          description: "Existing behavior — served while the flag is off (safe default).",
-        },
-        {
-          value: "v1",
-          name: "v1",
-          description: args.treatmentDescription || "New behavior introduced by this PR.",
-        },
-      ],
-      // On = v1 (index 1); Off = control (index 0) — flag-off preserves existing behavior.
+      variations,
+      // On = treatment (index 1); Off = control (index 0) — flag-off preserves existing behavior.
       defaults: { onVariation: 1, offVariation: 0 },
       ...(clientSide
         ? { clientSideAvailability: { usingEnvironmentId: true, usingMobileKey: false } }
@@ -335,14 +365,25 @@ export class LdResourceWriter {
       await this.ensureClientSideAvailability(args.key);
     }
     const clientSideNote = clientSide ? " Client-side SDK availability enabled." : "";
+    // The agent wires code against whatever shape was actually created, so the
+    // detail states it explicitly rather than leaving it to be assumed.
+    const treatmentValue = shape === "boolean" ? "true" : "v1";
+    const shapeNote =
+      shape === "boolean"
+        ? `BOOLEAN flag '${args.key}' (false = control, true = treatment; dark)`
+        : `MULTIVARIATE flag '${args.key}' (control + v1, dark)`;
+    const wiringNote =
+      shape === "boolean"
+        ? " Wire it with the repo's boolean flag helper, fail-safe default false."
+        : " Wire it as a STRING comparison against 'v1', fail-safe default 'control' — never through a boolean helper.";
     return {
       created: !alreadyExists,
       alreadyExists,
       key: args.key,
-      variation: "v1",
+      variation: treatmentValue,
       detail: alreadyExists
         ? `Flag '${args.key}' already exists in project '${this.ld.projectKey}' (no change).${clientSideNote}`
-        : `Created multivariate flag '${args.key}' (control + v1, dark) in project '${this.ld.projectKey}'.${clientSideNote}`,
+        : `Created ${shapeNote} in project '${this.ld.projectKey}'.${clientSideNote}${wiringNote}`,
     };
   }
 
