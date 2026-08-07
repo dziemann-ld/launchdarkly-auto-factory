@@ -60,6 +60,7 @@ import { postCheckRun } from "./checkRun.js";
 import { postPrComment } from "./comment.js";
 import { approveLabel, ensureLabel, fetchApprovalActor, fetchApprovedSteps } from "./labels.js";
 import { type PrContext, assemblePrContext } from "./prContext.js";
+import { type RunState, buildPrSummary } from "./summary.js";
 
 /**
  * Use the real GraphQL transport when VEGA_ENDPOINT + VEGA_TOKEN are set; else
@@ -325,6 +326,18 @@ function buildGateComment(gatedSteps: string[], approved: Set<string>, pendingNo
  * SDK). Run-level values only; per-step output flows through the node prompt.
  * LAUNCHDARKLY_PROJECT points at the data-plane app project where flags are created.
  */
+/** Map the walk + approval decision onto the outcome the summary headlines. */
+function runState(
+  walk: { verificationFailed?: unknown; truncatedAt?: unknown },
+  decision: { apply: boolean; noop: boolean; incomplete: boolean },
+): RunState {
+  if (walk.verificationFailed) return "verification-failed";
+  if (walk.truncatedAt) return "incomplete";
+  if (decision.noop) return "no-flag";
+  if (decision.incomplete) return "no-verdict";
+  return decision.apply ? "approved" : "rejected";
+}
+
 /** GitHub rejects comment bodies over 65536 chars; leave room for the summary. */
 const REVIEW_BODY_LIMIT = 55_000;
 
@@ -364,9 +377,12 @@ function proposedPatch(root: string): string {
     diff.length > PATCH_BODY_LIMIT
       ? `${diff.slice(0, PATCH_BODY_LIMIT)}\n\n[truncated — the full patch is in the Actions log]`
       : diff;
+  // Collapsed on purpose, even though it's the deliverable: the code review is
+  // what the reader should read first, and an expanded diff would push it out of
+  // view. The facts table says how many files and points down here.
   return [
     "<details>",
-    "<summary><b>Proposed changes</b> — not committed; apply with <code>git apply</code></summary>",
+    "<summary><b>Proposed changes</b> · apply with <code>git apply</code></summary>",
     "",
     "```diff",
     clipped,
@@ -721,56 +737,47 @@ async function main(): Promise<void> {
     console.log("✗ Not applied — code review REJECTED.");
   }
 
-  // Per-agent results table: status, routing tags, and judge score (when a
-  // LaunchDarkly judge evaluated the node). This is the at-a-glance record the
-  // PR reader gets without opening the Actions log.
-  const agentRows = walk.runs.map((r) => {
-    const judge = judgeScores.get(r.configKey);
-    const tags =
-      Object.entries(r.tags)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(", ")
-        .slice(0, 140) || "—";
-    return `| \`${r.configKey}\` | ${r.status} | ${judge !== undefined ? judge.toFixed(2) : "—"} | ${tags} |`;
-  });
-  const summary = [
-    "### LaunchDarkly Auto-Factory — Phase 1",
-    "",
-    `**Verdict:** ${decision.reason}` +
-      (policy.mode !== "yolo" ? ` _(approval mode: ${policy.mode}${policy.mode === "risk-threshold" ? ` @ ${policy.threshold}` : ""})_` : ""),
-    intentReview.line ?? "",
-    intentReview.warning ? `**⚠ Release intent:** ${intentReview.warning}` : "",
-    configDrift ? `**⚠ Config drift:** ${configDrift}` : "",
-    kg
-      ? `**Knowledge graph:** on — ${kg.graph.edges.filter((e) => e.kind === "service_calls").length} service edges (traces), ` +
-        `${kg.graph.edges.filter((e) => e.kind === "flag_wraps").length} wrap points (code refs)` +
-        (kg.warnings.length ? `; ⚠ ${kg.warnings.map((w) => w.split(" — ")[0]).join("; ⚠ ")}` : "")
-      : "",
-    walk.skipped.length ? `**Skipped:** ${walk.skipped.join(", ")}` : "",
-    stallText ? `**⚠ Stalled:** ${stallText}` : "",
-    verifyText ? `**⛔ Deterministic check failed:** ${verifyText}` : "",
-    truncText ? `**⛔ Incomplete:** ${truncText}` : "",
-    repoProfile ? `**Repo conventions read:** ${repoProfile.sources.map((s) => `\`${s.path}\``).join(", ")}` : "",
-    "",
-    "| Agent | Status | Judge | Tags |",
-    "|---|---|---|---|",
-    ...(agentRows.length ? agentRows : ["| (none ran) | — | — | — |"]),
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  // The review itself. Without this the PR carries only a verdict and a tag
-  // table, and the reasoning — the entire point of the run — is reachable only by
-  // scrolling the Actions log, so nobody reads it. Live proof of the cost: the
-  // reviewer correctly identified a real production bug on PR #26 and it merged
-  // anyway. Kept collapsed so the summary stays scannable, and the reviewer's
-  // findings are separated from the pipeline's own notes about itself.
+  // The reviewer's own findings, and — in propose mode — the uncommitted diff,
+  // which is the run's actual deliverable. Both were previously discarded: the PR
+  // carried only a verdict and a tag table, so the reasoning lived in the Actions
+  // log where nobody reads it. A real production bug found on PR #26 merged anyway.
   const reviewBody = reviewFindings(walk.runs);
-  // In propose mode the agents' work is uncommitted, so the patch IS the
-  // deliverable — it goes in the comment alongside the review.
   const patchBody = proposeMode() ? proposedPatch(sandboxRoot) : "";
-  const commentBody = [summary, patchBody, reviewBody].filter(Boolean).join("\n\n");
-  await postPrComment(commentBody, { prNumber: context.PR_NUMBER, repo: context.REPO });
+
+  const rendered = buildPrSummary({
+    state: runState(walk, decision),
+    reason: decision.reason,
+    runs: walk.runs,
+    tags: walk.tags,
+    skipped: walk.skipped,
+    judgeScores,
+    ...(process.env.LD_APP_PROJECT_KEY ? { appProjectKey: process.env.LD_APP_PROJECT_KEY } : {}),
+    ...(process.env.LD_BASE_URL ? { ldBaseUrl: process.env.LD_BASE_URL } : {}),
+    propose: proposeMode(),
+    ...(patchBody ? { patchBlock: patchBody } : {}),
+    ...(reviewBody ? { review: reviewBody } : {}),
+    ...(repoProfile ? { repoProfile } : {}),
+    approvalMode: policy.mode,
+    ...(policy.threshold !== undefined ? { approvalThreshold: policy.threshold } : {}),
+    warnings: {
+      ...(stallText ? { stallText } : {}),
+      ...(verifyText ? { verifyText } : {}),
+      ...(truncText ? { truncText } : {}),
+      ...(intentReview.line ? { intentLine: intentReview.line } : {}),
+      ...(intentReview.warning ? { intentWarning: intentReview.warning } : {}),
+      ...(configDrift ? { configDrift } : {}),
+      ...(kg
+        ? {
+            kgLine:
+              `**Knowledge graph:** ${kg.graph.edges.filter((e) => e.kind === "service_calls").length} service edges (traces), ` +
+              `${kg.graph.edges.filter((e) => e.kind === "flag_wraps").length} wrap points (code refs)` +
+              (kg.warnings.length ? `; ⚠ ${kg.warnings.map((w) => w.split(" — ")[0]).join("; ⚠ ")}` : ""),
+          }
+        : {}),
+    },
+  });
+
+  await postPrComment(rendered.comment, { prNumber: context.PR_NUMBER, repo: context.REPO });
 
   // Always post the verdict as a named check run, attached to the POST-chain
   // HEAD: the agents' [skip ci] commits move the PR head past the workflow's own
@@ -780,15 +787,9 @@ async function main(): Promise<void> {
     repo: context.REPO,
     headSha: checkoutHeadSha(sandboxRoot) ?? context.HEAD_SHA,
     conclusion: !walk.verificationFailed && !walk.truncatedAt && (decision.apply || decision.noop) ? "success" : "failure",
-    title: walk.verificationFailed
-      ? `Deterministic check failed after ${walk.verificationFailed.node}`
-      : walk.truncatedAt
-        ? `Incomplete — ${walk.truncatedAt.node} ended ${walk.truncatedAt.status}`
-        : decision.reason,
-    summary,
-    // The check's detail pane is the other place a reviewer looks; carry the
-    // findings there too, so the verdict is never a bare red X.
-    ...(reviewBody ? { text: reviewBody } : {}),
+    title: rendered.checkTitle,
+    summary: rendered.checkSummary,
+    ...(rendered.checkText ? { text: rendered.checkText } : {}),
   });
 
   // Non-zero exit fails the PR check. Green: applied, human-approval pause, or a

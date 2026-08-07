@@ -40374,6 +40374,158 @@ function assemblePrContext() {
   return ctx;
 }
 
+// src/summary.ts
+function countFindings(review) {
+  const counts = { blocking: 0, warnings: 0, notes: 0 };
+  if (!review) return counts;
+  let section;
+  for (const line of review.split("\n")) {
+    const h3 = /^###\s+(.+?)\s*$/.exec(line);
+    if (h3) {
+      const name = h3[1].toLowerCase();
+      section = name.startsWith("blocking") ? "blocking" : name.startsWith("warning") ? "warnings" : name.startsWith("note") ? "notes" : void 0;
+      continue;
+    }
+    if (!section) continue;
+    if (/^####\s+\S/.test(line) || section === "notes" && /^[-*]\s+\S/.test(line)) counts[section] += 1;
+  }
+  return counts;
+}
+function flagUrl(flagKey, projectKey, baseUrl) {
+  if (!flagKey || !projectKey) return void 0;
+  const base = (baseUrl || "https://app.launchdarkly.com").replace(/\/+$/, "");
+  return `${base}/projects/${projectKey}/flags/${flagKey}/targeting`;
+}
+var HEADLINE = {
+  "verification-failed": { icon: "\u26D4", title: "checks failed" },
+  incomplete: { icon: "\u26A0\uFE0F", title: "run incomplete" },
+  "no-flag": { icon: "\u26AA", title: "no flag needed" },
+  "no-verdict": { icon: "\u26A0\uFE0F", title: "no review verdict" },
+  rejected: { icon: "\u274C", title: "changes requested" },
+  approved: { icon: "\u2705", title: "review passed" }
+};
+function nextAction(input, counts) {
+  const hasPatch = Boolean(input.patchBlock);
+  switch (input.state) {
+    case "verification-failed":
+      return "**Nothing was applied.** A mechanical check on the pipeline's own output failed \u2014 see _Pipeline details_. This is a pipeline problem, not a problem with your code.";
+    case "incomplete":
+      return "**Nothing was applied.** An agent stopped before finishing, so the run was halted instead of continuing on a partial brief. Re-run by removing and re-adding the `autofactory` label; if it recurs, the turn budget needs raising.";
+    case "no-flag":
+      return "No action needed \u2014 this change doesn't need a feature flag, so no flag, metrics, or tests were created.";
+    case "no-verdict":
+      return "**Nothing was applied.** The chain ended without a review verdict, so nothing here is a judgment on your code \u2014 see _Pipeline details_.";
+    case "rejected": {
+      const n = counts.blocking;
+      const what = n > 0 ? `${n} blocking ${n === 1 ? "issue" : "issues"}` : "blocking issues";
+      return `**Start with the ${what} under _Code review_ below.** ${hasPatch ? "The proposed changes are included but not applied." : "Nothing was merged or applied."}`;
+    }
+    case "approved":
+      return hasPatch ? "**Apply the proposed changes below** (`git apply`), then merge as usual. The flag is off in every environment until it's released." : "**Ready to merge.** The flag is off in every environment until it's released.";
+  }
+}
+function factRows(input, counts) {
+  const rows = [];
+  const flagKey = input.tags.flag_key;
+  if (flagKey) {
+    const url = flagUrl(flagKey, input.appProjectKey, input.ldBaseUrl);
+    const link = url ? `[\`${flagKey}\`](${url})` : `\`${flagKey}\``;
+    const created = input.tags.flag_created === "true";
+    rows.push(`| **Flag** | ${link} \u2014 ${created ? "created" : "reused"}, serving the control variation in every environment |`);
+  }
+  const metrics = (input.tags.metric_keys ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (metrics.length) {
+    rows.push(`| **Metrics** | ${metrics.map((m) => `\`${m}\``).join(", ")} |`);
+  }
+  if (input.patchBlock) {
+    const files = countPatchFiles(input.patchBlock);
+    rows.push(
+      `| **Changes** | ${files ? `${files} file${files === 1 ? "" : "s"}` : "proposed"} \u2014 **not committed**, apply the diff below |`
+    );
+  } else if (input.propose && input.state !== "no-flag") {
+    rows.push("| **Changes** | none proposed |");
+  }
+  if (input.review) {
+    const parts = [];
+    if (counts.blocking) parts.push(`**${counts.blocking} blocking**`);
+    if (counts.warnings) parts.push(`${counts.warnings} warning${counts.warnings === 1 ? "" : "s"}`);
+    if (counts.notes) parts.push(`${counts.notes} note${counts.notes === 1 ? "" : "s"}`);
+    rows.push(`| **Review** | ${parts.length ? parts.join(" \xB7 ") : "no issues found"} |`);
+  }
+  const risk = input.tags.risk_score;
+  if (risk && rows.length) rows.push(`| **Risk score** | ${risk} |`);
+  return rows;
+}
+function countPatchFiles(patchBlock) {
+  return (patchBlock.match(/^diff --git /gm) ?? []).length;
+}
+function pipelineDetails(input) {
+  const rows = input.runs.map((r) => {
+    const judge = input.judgeScores.get(r.configKey);
+    const tags = Object.entries(r.tags).map(([k, v]) => `${k}=${v}`).join(", ").slice(0, 140) || "\u2014";
+    const name = r.configKey.replace(/^autofactory-/, "");
+    return `| \`${name}\` | ${r.status} | ${judge !== void 0 ? judge.toFixed(2) : "\u2014"} | ${tags} |`;
+  });
+  const w = input.warnings ?? {};
+  const notes = [
+    w.verifyText ? `- **Failed check:** ${w.verifyText}` : "",
+    w.truncText ? `- **Halted:** ${w.truncText}` : "",
+    w.stallText ? `- **Stalled:** ${w.stallText}` : "",
+    w.intentWarning ? `- **Release intent:** ${w.intentWarning}` : "",
+    w.configDrift ? `- **Config drift:** ${w.configDrift}` : "",
+    w.intentLine ? `- ${w.intentLine}` : "",
+    w.kgLine ? `- ${w.kgLine}` : "",
+    input.skipped.length ? `- **Not run:** ${input.skipped.map((s) => s.replace(/^autofactory-/, "")).join(", ")}` : "",
+    input.approvalMode && input.approvalMode !== "yolo" ? `- **Approval mode:** ${input.approvalMode}${input.approvalMode === "risk-threshold" && input.approvalThreshold !== void 0 ? ` @ ${input.approvalThreshold}` : ""}` : ""
+  ].filter(Boolean);
+  const profile = input.repoProfile ? [
+    "",
+    `**Repository conventions applied** (${input.repoProfile.sources.length} files, ${input.repoProfile.sources.reduce((n, s) => n + s.chars, 0).toLocaleString()} chars)`,
+    "",
+    input.repoProfile.sources.map((s) => `\`${s.path}\``).join(" \xB7 ")
+  ] : ["", "_No repository conventions found \u2014 the agents ran without repo context._"];
+  return [
+    "<details>",
+    "<summary>Pipeline details</summary>",
+    "",
+    ...notes.length ? [...notes, ""] : [],
+    "| Agent | Status | Judge | Tags |",
+    "|---|---|---|---|",
+    ...rows.length ? rows : ["| (none ran) | \u2014 | \u2014 | \u2014 |"],
+    ...profile,
+    "",
+    "</details>"
+  ].join("\n");
+}
+function reviewBlock(review, counts) {
+  const body = review.split("\n").filter((l) => !/^##\s+Review:/i.test(l)).map((l) => /^#{3,5}\s/.test(l) ? `#${l}` : l).join("\n").trim();
+  const label = counts.blocking ? `${counts.blocking} blocking` : counts.warnings ? `${counts.warnings} warning${counts.warnings === 1 ? "" : "s"}` : "no issues";
+  return ["<details open>", `<summary><b>Code review</b> \xB7 ${label}</summary>`, "", body, "", "</details>"].join("\n");
+}
+function buildPrSummary(input) {
+  const counts = countFindings(input.review ?? "");
+  const { icon, title } = HEADLINE[input.state];
+  const action = nextAction(input, counts);
+  const rows = factRows(input, counts);
+  const head = [
+    `### ${icon} AutoFactory \u2014 ${title}`,
+    "",
+    action,
+    ...rows.length ? ["", "| | |", "|---|---|", ...rows] : []
+  ].join("\n");
+  const artifacts = [
+    input.patchBlock ?? "",
+    input.review ? reviewBlock(input.review, counts) : ""
+  ].filter(Boolean);
+  const comment = [head, ...artifacts, pipelineDetails(input)].join("\n\n");
+  return {
+    comment,
+    checkTitle: `${title.charAt(0).toUpperCase()}${title.slice(1)} \u2014 ${input.reason}`,
+    checkSummary: head,
+    ...artifacts.length ? { checkText: artifacts.join("\n\n") } : {}
+  };
+}
+
 // src/action.ts
 function createVegaClient() {
   const endpoint = process.env.VEGA_ENDPOINT;
@@ -40541,6 +40693,13 @@ function buildGateComment(gatedSteps, approved, pendingNode) {
     ...lines
   ].join("\n");
 }
+function runState(walk2, decision) {
+  if (walk2.verificationFailed) return "verification-failed";
+  if (walk2.truncatedAt) return "incomplete";
+  if (decision.noop) return "no-flag";
+  if (decision.incomplete) return "no-verdict";
+  return decision.apply ? "approved" : "rejected";
+}
 var REVIEW_BODY_LIMIT = 55e3;
 var PATCH_BODY_LIMIT = 3e4;
 function proposeMode() {
@@ -40562,7 +40721,7 @@ function proposedPatch(root) {
 [truncated \u2014 the full patch is in the Actions log]` : diff;
   return [
     "<details>",
-    "<summary><b>Proposed changes</b> \u2014 not committed; apply with <code>git apply</code></summary>",
+    "<summary><b>Proposed changes</b> \xB7 apply with <code>git apply</code></summary>",
     "",
     "```diff",
     clipped,
@@ -40760,8 +40919,8 @@ async function main() {
     const label = approveLabel(node);
     await ensureLabel(context.REPO, label, process.env.GITHUB_TOKEN);
     console.log(`::warning::AutoFactory: awaiting approval before '${node}'. Add the PR label '${label}' to proceed.`);
-    const summary2 = buildGateComment(policy.steps.map((s) => s.step), approvedSteps, node);
-    await postPrComment(summary2, { prNumber: context.PR_NUMBER, repo: context.REPO });
+    const summary = buildGateComment(policy.steps.map((s) => s.step), approvedSteps, node);
+    await postPrComment(summary, { prNumber: context.PR_NUMBER, repo: context.REPO });
     await postCheckRun({
       repo: context.REPO,
       headSha: context.HEAD_SHA,
@@ -40800,43 +40959,44 @@ async function main() {
   } else {
     console.log("\u2717 Not applied \u2014 code review REJECTED.");
   }
-  const agentRows = walk2.runs.map((r) => {
-    const judge = judgeScores.get(r.configKey);
-    const tags = Object.entries(r.tags).map(([k, v]) => `${k}=${v}`).join(", ").slice(0, 140) || "\u2014";
-    return `| \`${r.configKey}\` | ${r.status} | ${judge !== void 0 ? judge.toFixed(2) : "\u2014"} | ${tags} |`;
-  });
-  const summary = [
-    "### LaunchDarkly Auto-Factory \u2014 Phase 1",
-    "",
-    `**Verdict:** ${decision.reason}` + (policy.mode !== "yolo" ? ` _(approval mode: ${policy.mode}${policy.mode === "risk-threshold" ? ` @ ${policy.threshold}` : ""})_` : ""),
-    intentReview.line ?? "",
-    intentReview.warning ? `**\u26A0 Release intent:** ${intentReview.warning}` : "",
-    configDrift ? `**\u26A0 Config drift:** ${configDrift}` : "",
-    kg ? `**Knowledge graph:** on \u2014 ${kg.graph.edges.filter((e) => e.kind === "service_calls").length} service edges (traces), ${kg.graph.edges.filter((e) => e.kind === "flag_wraps").length} wrap points (code refs)` + (kg.warnings.length ? `; \u26A0 ${kg.warnings.map((w) => w.split(" \u2014 ")[0]).join("; \u26A0 ")}` : "") : "",
-    walk2.skipped.length ? `**Skipped:** ${walk2.skipped.join(", ")}` : "",
-    stallText ? `**\u26A0 Stalled:** ${stallText}` : "",
-    verifyText ? `**\u26D4 Deterministic check failed:** ${verifyText}` : "",
-    truncText ? `**\u26D4 Incomplete:** ${truncText}` : "",
-    repoProfile ? `**Repo conventions read:** ${repoProfile.sources.map((s) => `\`${s.path}\``).join(", ")}` : "",
-    "",
-    "| Agent | Status | Judge | Tags |",
-    "|---|---|---|---|",
-    ...agentRows.length ? agentRows : ["| (none ran) | \u2014 | \u2014 | \u2014 |"]
-  ].filter(Boolean).join("\n");
   const reviewBody = reviewFindings(walk2.runs);
   const patchBody = proposeMode() ? proposedPatch(sandboxRoot) : "";
-  const commentBody = [summary, patchBody, reviewBody].filter(Boolean).join("\n\n");
-  await postPrComment(commentBody, { prNumber: context.PR_NUMBER, repo: context.REPO });
+  const rendered = buildPrSummary({
+    state: runState(walk2, decision),
+    reason: decision.reason,
+    runs: walk2.runs,
+    tags: walk2.tags,
+    skipped: walk2.skipped,
+    judgeScores,
+    ...process.env.LD_APP_PROJECT_KEY ? { appProjectKey: process.env.LD_APP_PROJECT_KEY } : {},
+    ...process.env.LD_BASE_URL ? { ldBaseUrl: process.env.LD_BASE_URL } : {},
+    propose: proposeMode(),
+    ...patchBody ? { patchBlock: patchBody } : {},
+    ...reviewBody ? { review: reviewBody } : {},
+    ...repoProfile ? { repoProfile } : {},
+    approvalMode: policy.mode,
+    ...policy.threshold !== void 0 ? { approvalThreshold: policy.threshold } : {},
+    warnings: {
+      ...stallText ? { stallText } : {},
+      ...verifyText ? { verifyText } : {},
+      ...truncText ? { truncText } : {},
+      ...intentReview.line ? { intentLine: intentReview.line } : {},
+      ...intentReview.warning ? { intentWarning: intentReview.warning } : {},
+      ...configDrift ? { configDrift } : {},
+      ...kg ? {
+        kgLine: `**Knowledge graph:** ${kg.graph.edges.filter((e) => e.kind === "service_calls").length} service edges (traces), ${kg.graph.edges.filter((e) => e.kind === "flag_wraps").length} wrap points (code refs)` + (kg.warnings.length ? `; \u26A0 ${kg.warnings.map((w) => w.split(" \u2014 ")[0]).join("; \u26A0 ")}` : "")
+      } : {}
+    }
+  });
+  await postPrComment(rendered.comment, { prNumber: context.PR_NUMBER, repo: context.REPO });
   await postCheckRun({
     name: "AutoFactory \u2014 Phase 1",
     repo: context.REPO,
     headSha: checkoutHeadSha(sandboxRoot) ?? context.HEAD_SHA,
     conclusion: !walk2.verificationFailed && !walk2.truncatedAt && (decision.apply || decision.noop) ? "success" : "failure",
-    title: walk2.verificationFailed ? `Deterministic check failed after ${walk2.verificationFailed.node}` : walk2.truncatedAt ? `Incomplete \u2014 ${walk2.truncatedAt.node} ended ${walk2.truncatedAt.status}` : decision.reason,
-    summary,
-    // The check's detail pane is the other place a reviewer looks; carry the
-    // findings there too, so the verdict is never a bare red X.
-    ...reviewBody ? { text: reviewBody } : {}
+    title: rendered.checkTitle,
+    summary: rendered.checkSummary,
+    ...rendered.checkText ? { text: rendered.checkText } : {}
   });
   if (walk2.verificationFailed || walk2.truncatedAt || !decision.apply && !decision.noop) process.exitCode = 1;
 }
