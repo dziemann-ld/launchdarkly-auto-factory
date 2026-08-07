@@ -29,6 +29,12 @@ export interface CheckRunOptions extends CheckRunTarget {
   conclusion: "action_required" | "success" | "neutral" | "failure";
   title: string;
   summary: string;
+  /**
+   * Optional long-form detail rendered below the summary in the check's own pane
+   * (markdown). Used to carry the code reviewer's findings, so a red check is
+   * never just a verdict with the reasoning left in the Actions log.
+   */
+  text?: string;
 }
 
 export async function postCheckRun(opts: CheckRunOptions): Promise<void> {
@@ -55,7 +61,7 @@ export async function postCheckRun(opts: CheckRunOptions): Promise<void> {
         head_sha: headSha,
         status: "completed",
         conclusion: opts.conclusion,
-        output: { title: opts.title, summary: opts.summary },
+        output: { title: opts.title, summary: opts.summary, ...(opts.text ? { text: opts.text } : {}) },
       }),
     });
     if (res.ok) {

@@ -1405,15 +1405,105 @@ export class SandboxToolExecutor {
       return { content: this.trunc(body), isError: t.code !== 0 };
     }
     if (has("package.json")) {
-      this.sh("npm", ["install", "--no-audit", "--no-fund"], cwd);
-      const t = this.sh("npm", ["test"], cwd);
-      return { content: this.trunc(`$ npm test (in ${where})\n${t.out}`), isError: t.code !== 0 };
+      return this.runNodeTests(cwd, where);
     }
     if (has("go.mod")) {
       const t = this.sh("go", ["test", "./..."], cwd);
       return { content: this.trunc(`$ go test ./... (in ${where})\n${t.out}`), isError: t.code !== 0 };
     }
     return { content: "run_tests: no recognized test setup (pytest/npm/go) found in this directory", isError: true };
+  }
+
+  /**
+   * Run a JavaScript/TypeScript suite. A bare `npm install && npm test` gets two
+   * things wrong on real repos:
+   *
+   *  - **The package manager.** A pnpm workspace has a `pnpm-lock.yaml` (and often
+   *    a stale `package-lock.json` alongside it); running `npm install` there
+   *    installs against the wrong lockfile and can produce a tree whose workspace
+   *    imports don't resolve.
+   *  - **The assumption of a root `test` script.** In a workspace, tests usually
+   *    live per package, so the root has none.
+   *
+   * Both bit us live: on a pnpm monorepo whose suites are `pnpm --filter <pkg> test`,
+   * `run_tests` reported no test setup, the agent concluded "no test runner
+   * configured", and an untested flag path shipped.
+   *
+   * `AUTOFACTORY_TEST_COMMAND` overrides all detection (e.g. when a repo's real
+   * command is documented but unusual).
+   */
+  private runNodeTests(cwd: string, where: string): ToolExecResult {
+    const has = (f: string) => existsSync(resolve(cwd, f));
+    const pkg = this.readJson(resolve(cwd, "package.json"));
+    const scripts = (pkg?.scripts ?? {}) as Record<string, unknown>;
+
+    const override = process.env.AUTOFACTORY_TEST_COMMAND?.trim();
+    if (override) {
+      const [file, ...args] = override.split(/\s+/);
+      const t = this.sh(file as string, args, cwd);
+      return { content: this.trunc(`$ ${override} (in ${where})\n${t.out}`), isError: t.code !== 0 };
+    }
+
+    // Package manager: the `packageManager` field is authoritative (Corepack),
+    // then the lockfile. npm last, since its lockfile is the one most likely to
+    // be stale in a repo that migrated away from it.
+    const declared = typeof pkg?.packageManager === "string" ? pkg.packageManager.split("@")[0] : undefined;
+    const pm =
+      declared && ["pnpm", "yarn", "npm", "bun"].includes(declared)
+        ? declared
+        : has("pnpm-lock.yaml")
+          ? "pnpm"
+          : has("yarn.lock")
+            ? "yarn"
+            : has("bun.lockb")
+              ? "bun"
+              : "npm";
+
+    const install: Record<string, string[]> = {
+      pnpm: ["install", "--frozen-lockfile"],
+      yarn: ["install"],
+      bun: ["install"],
+      npm: ["install", "--no-audit", "--no-fund"],
+    };
+    const i = this.sh(pm, install[pm] as string[], cwd);
+    // A frozen install fails when the lockfile is out of date; retry loose rather
+    // than reporting a test failure the change didn't cause.
+    if (i.code !== 0 && pm === "pnpm") this.sh(pm, ["install"], cwd);
+
+    // Prefer the root `test` script; fall back to running every workspace's.
+    const isWorkspace = has("pnpm-workspace.yaml") || Array.isArray(pkg?.workspaces) || pkg?.workspaces !== undefined;
+    let args: string[];
+    if (typeof scripts.test === "string") {
+      args = ["test"];
+    } else if (isWorkspace) {
+      args =
+        pm === "pnpm"
+          ? ["-r", "test"]
+          : pm === "yarn"
+            ? ["workspaces", "foreach", "-A", "run", "test"]
+            : ["test", "--workspaces", "--if-present"];
+    } else {
+      return {
+        content:
+          `run_tests: ${cwd === this.root ? "the repo root" : where} has a package.json but no \`test\` script and no ` +
+          `workspace layout, so there is nothing to run. Detected package manager: ${pm}. If this repo's tests run ` +
+          `some other way, the target-repository conventions in your prompt should say how — follow that, and note ` +
+          `here that run_tests could not execute them.`,
+        isError: true,
+      };
+    }
+
+    const t = this.sh(pm, args, cwd);
+    return { content: this.trunc(`$ ${pm} ${args.join(" ")} (in ${where})\n${t.out}`), isError: t.code !== 0 };
+  }
+
+  /** Parse a JSON file, or undefined when missing/unparseable. */
+  private readJson(path: string): Record<string, unknown> | undefined {
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
   }
 
   private commitAndPush(message: string): ToolExecResult {

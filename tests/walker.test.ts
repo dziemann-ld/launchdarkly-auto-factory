@@ -133,6 +133,68 @@ describe("walkGraph", () => {
   });
 });
 
+/**
+ * A node that ends without finishing (turn cap, failure, cancellation) has only a
+ * partial final message — and the walker hands that message to the next agent as
+ * its ENTIRE prompt. Halting is what stops one truncated node from silently
+ * degrading every agent after it.
+ */
+describe("walkGraph — incomplete nodes halt the chain", () => {
+  it("halts when the root stops mid-task instead of forwarding a fragment", async () => {
+    const r = await run({
+      research: {
+        status: "stopped",
+        messages: [{ role: "assistant", content: "Now let me look at existing tests and", isFinal: true }],
+      },
+    });
+    assert.deepEqual(
+      r.runs.map((x) => x.configKey),
+      ["research"],
+    );
+    assert.deepEqual(r.truncatedAt, { node: "research", status: "stopped" });
+    // Not a stall: routing was fine, the agent ran out of room.
+    assert.equal(r.stalledAt, undefined);
+  });
+
+  it("halts on a failed node too", async () => {
+    const r = await run({ flag: { status: "failed", tags: { flag_created: "true" } } });
+    assert.deepEqual(
+      r.runs.map((x) => x.configKey),
+      ["research", "flag"],
+    );
+    assert.equal(r.truncatedAt?.node, "flag");
+    assert.equal(r.truncatedAt?.status, "failed");
+  });
+
+  it("a fully completed chain reports no truncation", async () => {
+    const r = await run({
+      flag: { tags: { flag_created: "true" } },
+      review: { tags: { review_approved: "approve" } },
+    });
+    assert.equal(r.truncatedAt, undefined);
+  });
+
+  it("gives the root an explicit turn budget (it has no inbound edge to carry one)", async () => {
+    const seen: (number | undefined)[] = [];
+    class RecordingRunner implements AgentRunner {
+      async runNode(req: AgentNodeRequest): Promise<AgentNodeResult> {
+        seen.push(req.maxTurns);
+        return {
+          status: "completed",
+          messages: [{ role: "assistant", content: "ok", isFinal: true }],
+          tags: req.configKey === "flag" ? { flag_created: "true" } : {},
+        };
+      }
+    }
+    await walkGraph(buildGraph(), new RecordingRunner(), { PR_NUMBER: "1" });
+    // The root previously fell through to the runner's conservative default.
+    assert.ok(
+      typeof seen[0] === "number" && seen[0] >= 30,
+      `expected the root to get an explicit budget, got ${String(seen[0])}`,
+    );
+  });
+});
+
 describe("walkGraph — approval gates", () => {
   const fullScript = {
     flag: { tags: { flag_created: "true" } },

@@ -82,6 +82,40 @@ export interface WalkResult {
    * that node — downstream agents must not build on an unverified claim.
    */
   verificationFailed?: HandoffVerification;
+  /**
+   * Set when a node did NOT finish its work (it hit its turn cap mid-task, or
+   * failed / was cancelled). The chain halts there instead of handing the node's
+   * partial output downstream.
+   *
+   * Why halting is right: `buildPrompt` passes a node's final message to the next
+   * agent as its ENTIRE input, so a node that stops mid-sentence hands the next
+   * agent a fragment in place of a brief. Observed live: the research planner hit
+   * its cap and ended on "Now let me look at existing tests and patterns…", and
+   * the four agents after it ran with no classification, no files-to-modify, and
+   * no review brief — then the reviewer rejected the PR on findings about the
+   * agents rather than the code. A halt reports INCOMPLETE (see decideApproval),
+   * which is both true and actionable; the old behavior silently degraded.
+   */
+  truncatedAt?: { node: string; status: AgentNodeResult["status"] };
+}
+
+/**
+ * Node statuses that mean "this node did not finish", so its output must not be
+ * forwarded as a completed brief. `stopped` is the turn-cap case.
+ */
+const INCOMPLETE_STATUSES: ReadonlySet<AgentNodeResult["status"]> = new Set(["stopped", "failed", "cancelled"]);
+
+/**
+ * Turn budget for the ROOT node. Every other node inherits `max_turns` from the
+ * edge that reached it, but the root has no inbound edge — so it silently fell
+ * back to the runner's conservative default (12) and the research planner, the
+ * node that explores the whole codebase, was the one node most likely to run out.
+ * Override with AUTOFACTORY_ROOT_MAX_TURNS.
+ */
+const ROOT_MAX_TURNS = 30;
+
+function rootMaxTurns(): number {
+  return Number(process.env.AUTOFACTORY_ROOT_MAX_TURNS) || ROOT_MAX_TURNS;
 }
 
 /**
@@ -143,8 +177,14 @@ function handoffStringArray(handoff: Record<string, unknown> | undefined, field:
  * Build a node's prompt. Each node runs in its own conversation, so the prompt
  * carries the repo + PR header and, for non-root nodes, the previous agent's
  * full brief (the downstream agent's instructions tell it to parse this).
+ *
+ * `REPO_PROFILE` (the target repo's own documented conventions — see
+ * repoProfile.ts) leads the prompt when present: identical for every node, so it
+ * forms a stable cacheable prefix, and ahead of the brief because it governs how
+ * the brief should be interpreted.
  */
 function buildPrompt(hasInbound: boolean, ctx: Record<string, unknown>): string {
+  const profile = typeof ctx.REPO_PROFILE === "string" && ctx.REPO_PROFILE.length > 0 ? `${ctx.REPO_PROFILE}\n\n---\n\n` : "";
   const header = [
     ctx.REPO ? `Repository: ${ctx.REPO}` : "",
     ctx.PR_NUMBER ? `Pull request: #${ctx.PR_NUMBER}` : "",
@@ -153,10 +193,10 @@ function buildPrompt(hasInbound: boolean, ctx: Record<string, unknown>): string 
     .filter(Boolean)
     .join("\n");
   if (!hasInbound) {
-    return `${header}${ctx.PR_BODY ? `\n\n${ctx.PR_BODY}` : ""}`.trim();
+    return `${profile}${header}${ctx.PR_BODY ? `\n\n${ctx.PR_BODY}` : ""}`.trim();
   }
   const brief = typeof ctx.PREVIOUS_STEP_OUTPUT === "string" ? ctx.PREVIOUS_STEP_OUTPUT : "";
-  return `${header}\n\n${brief}`.trim();
+  return `${profile}${header}\n\n${brief}`.trim();
 }
 
 function lastAssistantText(result: AgentNodeResult): string {
@@ -210,6 +250,7 @@ export async function walkGraph(
   let stalledAt: StallInfo | undefined;
   let pendingApproval: { node: string } | undefined;
   let verificationFailed: HandoffVerification | undefined;
+  let truncatedAt: { node: string; status: AgentNodeResult["status"] } | undefined;
 
   while (node && !visited.has(node.getKey())) {
     const key = node.getKey();
@@ -227,7 +268,9 @@ export async function walkGraph(
     visited.add(key);
 
     const cfg = node.getConfig();
-    const maxTurns = handoffNumber(inboundHandoff, "max_turns");
+    // The root has no inbound edge to carry `max_turns`; give it an explicit
+    // budget rather than letting it fall through to the runner's default.
+    const maxTurns = handoffNumber(inboundHandoff, "max_turns") ?? (inboundHandoff === undefined ? rootMaxTurns() : undefined);
     const requestType = handoffString(inboundHandoff, "request_type");
     const capabilities = handoffStringArray(inboundHandoff, "capabilities");
     onEvent?.({ type: "node-start", configKey: key, index: runs.length });
@@ -255,6 +298,18 @@ export async function walkGraph(
     const run: NodeRun = { configKey: key, status: result.status, output, tags: result.tags };
     runs.push(run);
     onEvent?.({ type: "node-complete", configKey: key, index: runs.length - 1, run });
+
+    // The node did not finish: halt rather than hand its partial output to the
+    // next agent as a complete brief (see WalkResult.truncatedAt). Judges and
+    // shims are skipped — there is nothing complete to score or verify.
+    if (INCOMPLETE_STATUSES.has(result.status)) {
+      truncatedAt = { node: key, status: result.status };
+      console.error(
+        `[walk] '${key}' ended '${result.status}' — chain halted. Its output is partial and was NOT ` +
+          `passed downstream.${result.status === "stopped" ? ` Raise max_turns for this node (root: AUTOFACTORY_ROOT_MAX_TURNS, currently ${rootMaxTurns()}).` : ""}`,
+      );
+      break;
+    }
 
     // Judges attached to this node's config (if any) score the output now, on
     // the same tracker. Defensive: a judge problem must never break the walk.
@@ -353,5 +408,6 @@ export async function walkGraph(
     ...(stalledAt ? { stalledAt } : {}),
     ...(pendingApproval ? { pendingApproval } : {}),
     ...(verificationFailed ? { verificationFailed } : {}),
+    ...(truncatedAt ? { truncatedAt } : {}),
   };
 }

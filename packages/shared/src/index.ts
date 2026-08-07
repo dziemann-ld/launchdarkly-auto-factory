@@ -11,6 +11,8 @@ export * from "./configVersion.js";
 // GitHub Action and the Cursor extension). Front ends supply the context and a
 // reporter; the walk + approval logic lives here.
 export * from "./graphWalker.js";
+// Target-repo conventions injected into every agent prompt (see repoProfile.ts).
+export * from "./repoProfile.js";
 export * from "./workingTree.js";
 export * from "./handoffVerifier.js";
 export * from "./approval.js";

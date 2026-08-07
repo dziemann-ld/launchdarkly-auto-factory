@@ -29,6 +29,7 @@ import {
   createJudgeHook,
   LdClient,
   LdResourceWriter,
+  type NodeRun,
   type StallInfo,
   StubVegaTransport,
   VegaAgentRunner,
@@ -39,12 +40,14 @@ import {
   computeConfigHash,
   createPolicyGate,
   decideApproval,
+  describeRepoProfile,
   extractConfigStamp,
   getLdSdk,
   interpretWalk,
   intentIsDefault,
   initFactorySentry,
   loadRelatedRepos,
+  loadRepoProfile,
   normalizeReleaseIntent,
   pipelineContext,
   resolveAiProvider,
@@ -308,6 +311,28 @@ function buildGateComment(gatedSteps: string[], approved: Set<string>, pendingNo
  * SDK). Run-level values only; per-step output flows through the node prompt.
  * LAUNCHDARKLY_PROJECT points at the data-plane app project where flags are created.
  */
+/** GitHub rejects comment bodies over 65536 chars; leave room for the summary. */
+const REVIEW_BODY_LIMIT = 55_000;
+
+/**
+ * Render the code reviewer's actual findings for the PR comment / check run.
+ *
+ * The reviewer's output is the only artifact of the run a human is meant to act
+ * on, so it has to land where the human already is. Returns "" when no reviewer
+ * node ran (a stall, a halt, or a no-flag short-circuit), in which case the
+ * summary's own warning lines carry the story.
+ */
+function reviewFindings(runs: readonly NodeRun[]): string {
+  const review = runs.find((r) => r.configKey.includes("code-review"));
+  const body = review?.output?.trim();
+  if (!body) return "";
+  const clipped =
+    body.length > REVIEW_BODY_LIMIT
+      ? `${body.slice(0, REVIEW_BODY_LIMIT)}\n\n_[truncated — see the Actions log for the full review]_`
+      : body;
+  return ["<details open>", "<summary><b>Code review</b></summary>", "", clipped, "", "</details>"].join("\n");
+}
+
 function buildVariables(ctx: PrContext): Record<string, unknown> {
   return {
     PR_NUMBER: ctx.PR_NUMBER ?? "",
@@ -513,7 +538,27 @@ async function main(): Promise<void> {
   const verifierWriter = flagCreationWriter();
   const verifier = buildHandoffVerifier({ sandboxRoot, ...(verifierWriter ? { writer: verifierWriter } : {}) });
 
-  const walk = await walkGraph(graphDef, runner, context, graphTracker, undefined, gate, judgeHook, verifier);
+  // The target repo's own documented conventions (CLAUDE.md, .cursor/rules,
+  // docs/TESTING.md, or an explicit .autofactory/profile.md), injected into every
+  // agent's prompt so the chain stops guessing at things this repo has already
+  // written down. Absent those files, the profile is undefined and nothing changes.
+  const repoProfile = loadRepoProfile(sandboxRoot);
+  if (repoProfile) {
+    console.log(`Repo profile → ${describeRepoProfile(repoProfile)}`);
+  } else {
+    console.log("Repo profile → none found (no CLAUDE.md / AGENTS.md / .cursor/rules / docs/TESTING.md)");
+  }
+
+  const walk = await walkGraph(
+    graphDef,
+    runner,
+    { ...context, ...(repoProfile ? { REPO_PROFILE: repoProfile.text } : {}) },
+    graphTracker,
+    undefined,
+    gate,
+    judgeHook,
+    verifier,
+  );
 
   // Per-node visibility: dump each agent's terminal status, routing tags, and final output.
   for (const r of walk.runs) {
@@ -541,6 +586,16 @@ async function main(): Promise<void> {
       walk.verificationFailed.failures.map((f) => `[${f.name}] ${f.detail}`).join("; ")
     : "";
   if (verifyText) console.log(`::error::AutoFactory: ${verifyText}`);
+
+  // A node didn't finish (turn cap / failure), so the chain halted rather than
+  // pass a partial brief downstream. Distinct from a stall: the routing was fine,
+  // the agent ran out of room.
+  const truncText = walk.truncatedAt
+    ? `'${walk.truncatedAt.node}' ended '${walk.truncatedAt.status}' before finishing, so the chain stopped ` +
+      `rather than hand the next agent a partial brief.` +
+      (walk.truncatedAt.status === "stopped" ? " Raise that node's `max_turns` (root: `AUTOFACTORY_ROOT_MAX_TURNS`)." : "")
+    : "";
+  if (truncText) console.log(`::error::AutoFactory: ${truncText}`);
 
   // Halted at an approval gate: report what's pending + how to approve, then
   // stop. The flag/code for the gated step have NOT been created. A re-run once
@@ -629,6 +684,8 @@ async function main(): Promise<void> {
     walk.skipped.length ? `**Skipped:** ${walk.skipped.join(", ")}` : "",
     stallText ? `**⚠ Stalled:** ${stallText}` : "",
     verifyText ? `**⛔ Deterministic check failed:** ${verifyText}` : "",
+    truncText ? `**⛔ Incomplete:** ${truncText}` : "",
+    repoProfile ? `**Repo conventions read:** ${repoProfile.sources.map((s) => `\`${s.path}\``).join(", ")}` : "",
     "",
     "| Agent | Status | Judge | Tags |",
     "|---|---|---|---|",
@@ -636,7 +693,16 @@ async function main(): Promise<void> {
   ]
     .filter(Boolean)
     .join("\n");
-  await postPrComment(summary, { prNumber: context.PR_NUMBER, repo: context.REPO });
+
+  // The review itself. Without this the PR carries only a verdict and a tag
+  // table, and the reasoning — the entire point of the run — is reachable only by
+  // scrolling the Actions log, so nobody reads it. Live proof of the cost: the
+  // reviewer correctly identified a real production bug on PR #26 and it merged
+  // anyway. Kept collapsed so the summary stays scannable, and the reviewer's
+  // findings are separated from the pipeline's own notes about itself.
+  const reviewBody = reviewFindings(walk.runs);
+  const commentBody = reviewBody ? `${summary}\n\n${reviewBody}` : summary;
+  await postPrComment(commentBody, { prNumber: context.PR_NUMBER, repo: context.REPO });
 
   // Always post the verdict as a named check run, attached to the POST-chain
   // HEAD: the agents' [skip ci] commits move the PR head past the workflow's own
@@ -645,16 +711,23 @@ async function main(): Promise<void> {
     name: "AutoFactory — Phase 1",
     repo: context.REPO,
     headSha: checkoutHeadSha(sandboxRoot) ?? context.HEAD_SHA,
-    conclusion: !walk.verificationFailed && (decision.apply || decision.noop) ? "success" : "failure",
-    title: walk.verificationFailed ? `Deterministic check failed after ${walk.verificationFailed.node}` : decision.reason,
+    conclusion: !walk.verificationFailed && !walk.truncatedAt && (decision.apply || decision.noop) ? "success" : "failure",
+    title: walk.verificationFailed
+      ? `Deterministic check failed after ${walk.verificationFailed.node}`
+      : walk.truncatedAt
+        ? `Incomplete — ${walk.truncatedAt.node} ended ${walk.truncatedAt.status}`
+        : decision.reason,
     summary,
+    // The check's detail pane is the other place a reviewer looks; carry the
+    // findings there too, so the verdict is never a bare red X.
+    ...(reviewBody ? { text: reviewBody } : {}),
   });
 
   // Non-zero exit fails the PR check. Green: applied, human-approval pause, or a
   // no-op (no flag needed). Red: a genuine rejection, an incomplete run (the
   // chain stalled / never reviewed), or a failed deterministic check — each
   // carries its own distinct message above.
-  if (walk.verificationFailed || (!decision.apply && !decision.noop)) process.exitCode = 1;
+  if (walk.verificationFailed || walk.truncatedAt || (!decision.apply && !decision.noop)) process.exitCode = 1;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
