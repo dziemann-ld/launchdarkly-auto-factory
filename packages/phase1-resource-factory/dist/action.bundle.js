@@ -38643,12 +38643,28 @@ ${verdicts.join("\n")}` : "")
     }
     return void 0;
   }
+  /** The commit where HEAD diverged from `ref`, or undefined if git can't say. */
+  mergeBase(ref) {
+    try {
+      const sha = this.runGit(["merge-base", ref, "HEAD"]).trim();
+      return sha || void 0;
+    } catch {
+      return void 0;
+    }
+  }
   gitDiff(base) {
     try {
       const ref = this.resolveBaseRef(base);
       if (!ref)
         return { content: "git_diff: could not resolve a base ref (not a git checkout?)", isError: true };
-      const args = this.gitMode === "workingTree" ? ["diff", ref] : ["diff", `${ref}...HEAD`];
+      const from = this.gitMode === "workingTree" ? this.mergeBase(ref) ?? ref : ref;
+      if (this.gitMode === "workingTree") {
+        try {
+          this.runGit(["add", "-A", "-N"]);
+        } catch {
+        }
+      }
+      const args = this.gitMode === "workingTree" ? ["diff", from] : ["diff", `${ref}...HEAD`];
       const out = this.runGit(args);
       if (!out.trim())
         return { content: `(no differences vs ${ref})` };

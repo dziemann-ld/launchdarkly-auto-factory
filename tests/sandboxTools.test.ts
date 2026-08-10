@@ -384,6 +384,68 @@ describe("SandboxToolExecutor — commit_and_push gitMode", () => {
   });
 });
 
+/**
+ * `git_diff` must diff from the MERGE BASE in both git modes.
+ *
+ * Regression: workingTree mode diffed against the base ref's tip, so every commit
+ * the base branch made after the branch diverged appeared in the PR's diff with the
+ * sign flipped — as though this PR had reverted it. On a real run that produced two
+ * confident BLOCKING findings ("OIDC trust re-added", "migrate-iam.tf deleted") for
+ * a PR that touched no infrastructure at all.
+ */
+describe("SandboxToolExecutor — git_diff is scoped to the merge base", () => {
+  const git = (args: string[]) =>
+    execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+  /** main with a shared file, a feature branch, then main moves on independently. */
+  function repoWithDivergedMain(): void {
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "t@example.com"]);
+    git(["config", "user.name", "Test"]);
+    writeFileSync(join(root, "infra.tf"), "trust = [main]\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base"]);
+
+    git(["checkout", "-q", "-b", "feature"]);
+    writeFileSync(join(root, "app.ts"), "export const x = 1;\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "feature work"]);
+
+    // main advances AFTER the branch point — the PR knows nothing about this.
+    git(["checkout", "-q", "main"]);
+    writeFileSync(join(root, "infra.tf"), "trust = [main]\nhardening = true\n");
+    writeFileSync(join(root, "migrate-iam.tf"), "role = migrate\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "post-cutover hardening"]);
+    git(["checkout", "-q", "feature"]);
+  }
+
+  it("excludes the base branch's later commits, and includes uncommitted agent edits", async () => {
+    repoWithDivergedMain();
+    const exec = new SandboxToolExecutor(root, undefined, true, undefined, undefined, "workingTree");
+    // An agent edit, uncommitted — the reason workingTree mode can't use three-dot.
+    await exec.execute("write_file", { path: "app.test.ts", content: "test('x', () => {});\n" });
+
+    const r = await exec.execute("git_diff", { base: "main" });
+    const out = r.content;
+
+    // The PR's own work, plus the agent's uncommitted edit.
+    assert.match(out, /app\.ts/);
+    assert.match(out, /app\.test\.ts/);
+    // NOT main's later commits, in either direction.
+    assert.doesNotMatch(out, /migrate-iam\.tf/);
+    assert.doesNotMatch(out, /hardening/);
+  });
+
+  it("push mode keeps the three-dot form, which is already merge-base scoped", async () => {
+    repoWithDivergedMain();
+    const exec = new SandboxToolExecutor(root, undefined, true, undefined, undefined, "push");
+    const r = await exec.execute("git_diff", { base: "main" });
+    assert.match(r.content, /app\.ts/);
+    assert.doesNotMatch(r.content, /migrate-iam\.tf/);
+  });
+});
+
 describe("SandboxToolExecutor — create_metric", () => {
   const fakeWriter = () => {
     const calls: CreateMetricArgs[] = [];

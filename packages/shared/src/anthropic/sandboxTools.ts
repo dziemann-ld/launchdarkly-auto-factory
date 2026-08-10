@@ -1363,14 +1363,47 @@ export class SandboxToolExecutor {
     return undefined;
   }
 
+  /** The commit where HEAD diverged from `ref`, or undefined if git can't say. */
+  private mergeBase(ref: string): string | undefined {
+    try {
+      const sha = this.runGit(["merge-base", ref, "HEAD"]).trim();
+      return sha || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private gitDiff(base?: string): ToolExecResult {
     try {
       const ref = this.resolveBaseRef(base);
       if (!ref) return { content: "git_diff: could not resolve a base ref (not a git checkout?)", isError: true };
-      // push mode (GHA): committed delta vs base. workingTree mode (extension):
-      // diff the working tree against base so UNCOMMITTED agent edits (flag
-      // wiring, instrumentation, tests) are included — downstream agents need them.
-      const args = this.gitMode === "workingTree" ? ["diff", ref] : ["diff", `${ref}...HEAD`];
+      // Both modes must diff from the MERGE BASE, never from the base ref's tip.
+      //
+      // push mode: `diff base...HEAD` already means merge-base → HEAD.
+      //
+      // workingTree mode has to include UNCOMMITTED agent edits, so it can't use
+      // three-dot (which ignores the working tree). It diffs against the merge-base
+      // COMMIT instead. Diffing against `base` directly — which this did — also
+      // reports every change the base branch made since the branch diverged, with
+      // the sign flipped, as though this PR had reverted them. That produced two
+      // confident BLOCKING findings on a PR that touched no infra at all: "OIDC
+      // trust re-added after cutover" and "deletion of migrate-iam.tf" were both
+      // just `main` having moved ahead. Losing the merge base is how a review starts
+      // rejecting people for other people's commits.
+      const from = this.gitMode === "workingTree" ? this.mergeBase(ref) ?? ref : ref;
+      if (this.gitMode === "workingTree") {
+        // `git diff <commit>` ignores UNTRACKED files, so brand-new files the agents
+        // wrote — most importantly the test files — were absent from the diff every
+        // downstream node reads. `-N` records intent-to-add so they appear as new
+        // files. It touches the index only, never the working tree, and nothing is
+        // committed in this mode.
+        try {
+          this.runGit(["add", "-A", "-N"]);
+        } catch {
+          /* non-fatal: a diff missing new files is still better than no diff */
+        }
+      }
+      const args = this.gitMode === "workingTree" ? ["diff", from] : ["diff", `${ref}...HEAD`];
       const out = this.runGit(args);
       if (!out.trim()) return { content: `(no differences vs ${ref})` };
       return out.length > 60_000 ? { content: `${out.slice(0, 60_000)}\n…[diff truncated]` } : { content: out };
