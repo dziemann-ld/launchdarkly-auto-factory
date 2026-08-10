@@ -404,11 +404,12 @@ function reviewFindings(runs: readonly NodeRun[]): string {
   const review = runs.find((r) => r.configKey.includes("code-review"));
   const body = review?.output?.trim();
   if (!body) return "";
-  const clipped =
-    body.length > REVIEW_BODY_LIMIT
-      ? `${body.slice(0, REVIEW_BODY_LIMIT)}\n\n_[truncated — see the Actions log for the full review]_`
-      : body;
-  return ["<details open>", "<summary><b>Code review</b></summary>", "", clipped, "", "</details>"].join("\n");
+  // RAW markdown only — `summary.ts` owns the <details> wrapper and the severity
+  // label on it. Wrapping here too produced a nested <details> with the "Code
+  // review" heading printed twice.
+  return body.length > REVIEW_BODY_LIMIT
+    ? `${body.slice(0, REVIEW_BODY_LIMIT)}\n\n_[truncated — see the Actions log for the full review]_`
+    : body;
 }
 
 function buildVariables(ctx: PrContext): Record<string, unknown> {

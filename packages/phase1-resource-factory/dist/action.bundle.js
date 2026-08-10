@@ -40740,10 +40740,9 @@ function reviewFindings(runs) {
   const review = runs.find((r) => r.configKey.includes("code-review"));
   const body = review?.output?.trim();
   if (!body) return "";
-  const clipped = body.length > REVIEW_BODY_LIMIT ? `${body.slice(0, REVIEW_BODY_LIMIT)}
+  return body.length > REVIEW_BODY_LIMIT ? `${body.slice(0, REVIEW_BODY_LIMIT)}
 
 _[truncated \u2014 see the Actions log for the full review]_` : body;
-  return ["<details open>", "<summary><b>Code review</b></summary>", "", clipped, "", "</details>"].join("\n");
 }
 function buildVariables(ctx) {
   return {

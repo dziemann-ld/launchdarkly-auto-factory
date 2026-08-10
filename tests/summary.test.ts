@@ -136,6 +136,17 @@ describe("buildPrSummary — approved with a proposed patch", () => {
     assert.match(rendered.comment, /\| \*\*Review\*\* \| 1 warning \|/);
   });
 
+  // Regression: the review was wrapped in <details> by BOTH the action and the
+  // renderer, so the live comment showed a nested block with "Code review" twice.
+  it("wraps the review in exactly one <details>", () => {
+    assert.equal(rendered.comment.split("<b>Code review</b>").length - 1, 1);
+    const opens = (rendered.comment.match(/<details/g) ?? []).length;
+    const closes = (rendered.comment.match(/<\/details>/g) ?? []).length;
+    assert.equal(opens, closes, "unbalanced <details> tags");
+    // patch + review + pipeline details, and nothing nested inside them.
+    assert.equal(opens, 3);
+  });
+
   it("demotes the reviewer's headings so they nest under the comment's own", () => {
     // The reviewer's `### Warnings` becomes `#### Warnings` inside <details>.
     assert.match(rendered.comment, /^#### Warnings$/m);
