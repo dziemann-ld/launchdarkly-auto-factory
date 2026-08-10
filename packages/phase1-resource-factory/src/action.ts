@@ -27,6 +27,7 @@ import {
   createCursorJudgeCompletion,
   createGitDiffEvidence,
   createJudgeHook,
+  type FlagState,
   LdClient,
   LdResourceWriter,
   type NodeRun,
@@ -745,6 +746,29 @@ async function main(): Promise<void> {
   const reviewBody = reviewFindings(walk.runs);
   const patchBody = proposeMode() ? proposedPatch(sandboxRoot) : "";
 
+  // Read the flag's ACTUAL per-environment targeting so the summary can state it
+  // instead of assuming it. Best-effort: a read failure leaves it undefined and the
+  // summary says the targeting wasn't read, which is honest — the earlier version
+  // templated "serving the control variation in every environment" and was wrong on
+  // the first flag-worthy run (the flag was on in `test`, serving the treatment).
+  let flagState: FlagState | undefined;
+  const summaryFlagKey = walk.tags.flag_key;
+  if (summaryFlagKey && verifierWriter) {
+    try {
+      const state = await verifierWriter.getFlagState(summaryFlagKey);
+      if (state.exists) {
+        flagState = state;
+        console.log(
+          `Flag targeting: ${Object.entries(state.environments)
+            .map(([env, e]) => `${env}=${e.on ? `on(${e.released.join(",") || "no traffic"})` : "off"}`)
+            .join(" ")}`,
+        );
+      }
+    } catch (e) {
+      console.warn(`Could not read flag targeting (non-fatal): ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   const rendered = buildPrSummary({
     state: runState(walk, decision),
     reason: decision.reason,
@@ -754,6 +778,7 @@ async function main(): Promise<void> {
     judgeScores,
     ...(process.env.LD_APP_PROJECT_KEY ? { appProjectKey: process.env.LD_APP_PROJECT_KEY } : {}),
     ...(process.env.LD_BASE_URL ? { ldBaseUrl: process.env.LD_BASE_URL } : {}),
+    ...(flagState ? { flagState } : {}),
     propose: proposeMode(),
     ...(patchBody ? { patchBlock: patchBody } : {}),
     ...(reviewBody ? { review: reviewBody } : {}),

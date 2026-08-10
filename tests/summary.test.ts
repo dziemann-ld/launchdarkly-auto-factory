@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { NodeRun, RepoProfile } from "@auto-factory/shared";
+import type { FlagState, NodeRun, RepoProfile } from "@auto-factory/shared";
 import { buildPrSummary, countFindings, flagUrl, type SummaryInput } from "../packages/phase1-resource-factory/src/summary.js";
 
 /**
@@ -125,9 +125,13 @@ describe("buildPrSummary — approved with a proposed patch", () => {
     assert.match(rendered.comment, /\*\*Apply the proposed changes below\*\*/);
   });
 
-  it("links the flag into LaunchDarkly and says it is not live", () => {
+  it("links the flag into LaunchDarkly", () => {
     assert.match(rendered.comment, /\[`enable-x`\]\(https:\/\/app\.launchdarkly\.com\/projects\/enablement-launchpad\/flags\/enable-x\/targeting\)/);
-    assert.match(rendered.comment, /serving the control variation in every environment/);
+  });
+
+  it("makes no claim about targeting when it wasn't read", () => {
+    assert.match(rendered.comment, /\| \*\*Targeting\*\* \| not read this run/);
+    assert.doesNotMatch(rendered.comment, /every environment/);
   });
 
   it("summarizes metrics, changed-file count, and review severity in the facts table", () => {
@@ -152,6 +156,66 @@ describe("buildPrSummary — approved with a proposed patch", () => {
     assert.match(rendered.comment, /^#### Warnings$/m);
     // Its title line is dropped — the verdict is already the headline.
     assert.doesNotMatch(rendered.comment, /## Review: APPROVE/);
+  });
+});
+
+/**
+ * Regression for the worst bug this summary has had: it printed "serving the
+ * control variation in every environment" as a hardcoded string. On the first
+ * flag-worthy run that was false — the flag was ON in `test` serving the treatment
+ * — and the claim sat exactly where a reviewer decides whether merging is safe.
+ */
+describe("buildPrSummary — flag targeting is read, never assumed", () => {
+  const env = (on: boolean, released: string[]) => ({
+    on,
+    released,
+    fallthroughServes: released,
+    prerequisites: [],
+    rulesServe: [],
+    individualTargets: false,
+  });
+  const state = (envs: Record<string, ReturnType<typeof env>>): FlagState => ({
+    exists: true,
+    key: "drive-root-folder-id",
+    kind: "multivariate",
+    variations: [{ value: "0AAxkpvxpc6uvUk9PVA" }, { value: "" }],
+    environments: envs,
+  });
+  const withFlag = { ...base, tags: { flag_key: "drive-root-folder-id" }, appProjectKey: "p" };
+
+  it("reports the real per-environment state, and warns when already live", () => {
+    const r = buildPrSummary({
+      ...withFlag,
+      flagState: state({ production: env(false, []), test: env(true, ["0AAxkpvxpc6uvUk9PVA"]) }),
+    });
+    assert.match(r.comment, /\| \*\*Targeting\*\* \| `production` off · `test` \*\*on\*\* → `0AAxkpvxpc6uvUk9PVA` \|/);
+    // The dangerous claim must be gone, and replaced with a warning.
+    assert.doesNotMatch(r.comment, /off in every environment/);
+    assert.match(r.comment, /already live\*\* in `test`/);
+    assert.match(r.comment, /merging changes behavior there immediately/);
+  });
+
+  it("only claims 'off everywhere' when LaunchDarkly actually says so", () => {
+    const r = buildPrSummary({ ...withFlag, flagState: state({ production: env(false, []), test: env(false, []) }) });
+    assert.match(r.comment, /The flag is off in every environment, so merging does not change behavior yet/);
+    assert.doesNotMatch(r.comment, /already live/);
+  });
+
+  it("an 'on' flag serving no traffic is not reported as live", () => {
+    const r = buildPrSummary({ ...withFlag, flagState: state({ production: env(true, []) }) });
+    assert.match(r.comment, /`production` on \(serving no traffic\)/);
+    assert.doesNotMatch(r.comment, /already live/);
+  });
+
+  it("says the targeting was not read rather than implying the flag is dark", () => {
+    const r = buildPrSummary(withFlag);
+    assert.match(r.comment, /not read this run — check LaunchDarkly before merging/);
+    assert.doesNotMatch(r.comment, /off in every environment/);
+  });
+
+  it("shows the empty-string variation legibly", () => {
+    const r = buildPrSummary({ ...withFlag, flagState: state({ production: env(true, [""]) }) });
+    assert.match(r.comment, /`""`/);
   });
 });
 

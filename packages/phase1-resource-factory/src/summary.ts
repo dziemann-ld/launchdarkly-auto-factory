@@ -19,7 +19,7 @@
  * Nothing is repeated across sections.
  */
 
-import type { NodeRun, RepoProfile, StallInfo } from "@auto-factory/shared";
+import type { FlagState, NodeRun, RepoProfile, StallInfo } from "@auto-factory/shared";
 
 /** Terminal outcome of a run, in the order the headline checks for them. */
 export type RunState =
@@ -42,6 +42,18 @@ export interface SummaryInput {
   /** App/data-plane project, for linking the flag into the LaunchDarkly UI. */
   appProjectKey?: string;
   ldBaseUrl?: string;
+  /**
+   * The flag's ACTUAL per-environment targeting, read from LaunchDarkly after the
+   * walk. Undefined when it could not be read (no API access, or no flag).
+   *
+   * This exists because the first version of this summary asserted the flag was
+   * "serving the control variation in every environment" as a hardcoded string. On
+   * the very first flag-worthy run that was false — the flag was ON in `test`
+   * serving the treatment — and the claim appeared exactly where a reviewer looks
+   * to decide whether merging is safe. Release state is a fact to be read, never a
+   * reassurance to be templated.
+   */
+  flagState?: FlagState;
   /** True when the agents' edits were left uncommitted for a human to apply. */
   propose: boolean;
   /** Rendered `<details>` block for the proposed diff, or "". */
@@ -121,6 +133,37 @@ export function flagUrl(flagKey?: string, projectKey?: string, baseUrl?: string)
   return `${base}/projects/${projectKey}/flags/${flagKey}/targeting`;
 }
 
+/** Shorten a variation value for display; folder IDs and JSON get long. */
+function shortValue(v: string): string {
+  if (v === "") return '""';
+  return v.length > 24 ? `${v.slice(0, 21)}…` : v;
+}
+
+/** Environments where the flag is on AND actually serving a variation to traffic. */
+function liveEnvironments(state?: FlagState): string[] {
+  if (!state?.exists) return [];
+  return Object.entries(state.environments)
+    .filter(([, e]) => e.on && e.released.length > 0)
+    .map(([env]) => env);
+}
+
+/**
+ * Per-environment targeting, stated plainly. "off" means the off-variation is
+ * served, which is the control path; "on → value" means real traffic is getting
+ * that variation right now.
+ */
+function targetingSummary(state: FlagState): string {
+  const envs = Object.entries(state.environments);
+  if (envs.length === 0) return "targeting could not be read";
+  return envs
+    .map(([env, e]) => {
+      if (!e.on) return `\`${env}\` off`;
+      if (e.released.length === 0) return `\`${env}\` on (serving no traffic)`;
+      return `\`${env}\` **on** → ${e.released.map((v) => `\`${shortValue(v)}\``).join(", ")}`;
+    })
+    .join(" · ");
+}
+
 const HEADLINE: Record<RunState, { icon: string; title: string }> = {
   "verification-failed": { icon: "⛔", title: "checks failed" },
   incomplete: { icon: "⚠️", title: "run incomplete" },
@@ -152,10 +195,17 @@ function nextAction(input: SummaryInput, counts: FindingCounts): string {
         hasPatch ? "The proposed changes are included but not applied." : "Nothing was merged or applied."
       }`;
     }
-    case "approved":
-      return hasPatch
-        ? "**Apply the proposed changes below** (`git apply`), then merge as usual. The flag is off in every environment until it's released."
-        : "**Ready to merge.** The flag is off in every environment until it's released.";
+    case "approved": {
+      const lead = hasPatch ? "**Apply the proposed changes below** (`git apply`), then merge as usual." : "**Ready to merge.**";
+      const live = liveEnvironments(input.flagState);
+      // Only claim the flag is dark when LaunchDarkly actually says so. If it is
+      // already serving somewhere, that is the reviewer's business — flag it.
+      if (live.length > 0) {
+        return `${lead} ⚠️ Note: this flag is **already live** in ${live.map((e) => `\`${e}\``).join(", ")} — merging changes behavior there immediately, not on release.`;
+      }
+      if (input.flagState?.exists) return `${lead} The flag is off in every environment, so merging does not change behavior yet.`;
+      return lead;
+    }
   }
 }
 
@@ -167,7 +217,15 @@ function factRows(input: SummaryInput, counts: FindingCounts): string[] {
     const url = flagUrl(flagKey, input.appProjectKey, input.ldBaseUrl);
     const link = url ? `[\`${flagKey}\`](${url})` : `\`${flagKey}\``;
     const created = input.tags.flag_created === "true";
-    rows.push(`| **Flag** | ${link} — ${created ? "created" : "reused"}, serving the control variation in every environment |`);
+    const kind = input.flagState?.exists ? `${input.flagState.kind}, ` : "";
+    rows.push(`| **Flag** | ${link} — ${kind}${created ? "created" : "reused"} |`);
+    // Targeting is READ, never assumed. When we couldn't read it, say so rather
+    // than implying the flag is dark.
+    rows.push(
+      `| **Targeting** | ${
+        input.flagState?.exists ? targetingSummary(input.flagState) : "not read this run — check LaunchDarkly before merging"
+      } |`,
+    );
   }
   const metrics = (input.tags.metric_keys ?? "")
     .split(",")

@@ -40396,6 +40396,23 @@ function flagUrl(flagKey, projectKey, baseUrl) {
   const base = (baseUrl || "https://app.launchdarkly.com").replace(/\/+$/, "");
   return `${base}/projects/${projectKey}/flags/${flagKey}/targeting`;
 }
+function shortValue(v) {
+  if (v === "") return '""';
+  return v.length > 24 ? `${v.slice(0, 21)}\u2026` : v;
+}
+function liveEnvironments(state) {
+  if (!state?.exists) return [];
+  return Object.entries(state.environments).filter(([, e]) => e.on && e.released.length > 0).map(([env]) => env);
+}
+function targetingSummary(state) {
+  const envs = Object.entries(state.environments);
+  if (envs.length === 0) return "targeting could not be read";
+  return envs.map(([env, e]) => {
+    if (!e.on) return `\`${env}\` off`;
+    if (e.released.length === 0) return `\`${env}\` on (serving no traffic)`;
+    return `\`${env}\` **on** \u2192 ${e.released.map((v) => `\`${shortValue(v)}\``).join(", ")}`;
+  }).join(" \xB7 ");
+}
 var HEADLINE = {
   "verification-failed": { icon: "\u26D4", title: "checks failed" },
   incomplete: { icon: "\u26A0\uFE0F", title: "run incomplete" },
@@ -40423,8 +40440,15 @@ function nextAction(input, counts) {
       const what = n > 0 ? `${n} blocking ${n === 1 ? "issue" : "issues"}` : "blocking issues";
       return `**Start with the ${what} under _Code review_ below.** ${hasPatch ? "The proposed changes are included but not applied." : "Nothing was merged or applied."}`;
     }
-    case "approved":
-      return hasPatch ? "**Apply the proposed changes below** (`git apply`), then merge as usual. The flag is off in every environment until it's released." : "**Ready to merge.** The flag is off in every environment until it's released.";
+    case "approved": {
+      const lead = hasPatch ? "**Apply the proposed changes below** (`git apply`), then merge as usual." : "**Ready to merge.**";
+      const live = liveEnvironments(input.flagState);
+      if (live.length > 0) {
+        return `${lead} \u26A0\uFE0F Note: this flag is **already live** in ${live.map((e) => `\`${e}\``).join(", ")} \u2014 merging changes behavior there immediately, not on release.`;
+      }
+      if (input.flagState?.exists) return `${lead} The flag is off in every environment, so merging does not change behavior yet.`;
+      return lead;
+    }
   }
 }
 function factRows(input, counts) {
@@ -40434,7 +40458,11 @@ function factRows(input, counts) {
     const url = flagUrl(flagKey, input.appProjectKey, input.ldBaseUrl);
     const link = url ? `[\`${flagKey}\`](${url})` : `\`${flagKey}\``;
     const created = input.tags.flag_created === "true";
-    rows.push(`| **Flag** | ${link} \u2014 ${created ? "created" : "reused"}, serving the control variation in every environment |`);
+    const kind = input.flagState?.exists ? `${input.flagState.kind}, ` : "";
+    rows.push(`| **Flag** | ${link} \u2014 ${kind}${created ? "created" : "reused"} |`);
+    rows.push(
+      `| **Targeting** | ${input.flagState?.exists ? targetingSummary(input.flagState) : "not read this run \u2014 check LaunchDarkly before merging"} |`
+    );
   }
   const metrics = (input.tags.metric_keys ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   if (metrics.length) {
@@ -40966,6 +40994,21 @@ async function main() {
   }
   const reviewBody = reviewFindings(walk2.runs);
   const patchBody = proposeMode() ? proposedPatch(sandboxRoot) : "";
+  let flagState;
+  const summaryFlagKey = walk2.tags.flag_key;
+  if (summaryFlagKey && verifierWriter) {
+    try {
+      const state = await verifierWriter.getFlagState(summaryFlagKey);
+      if (state.exists) {
+        flagState = state;
+        console.log(
+          `Flag targeting: ${Object.entries(state.environments).map(([env, e]) => `${env}=${e.on ? `on(${e.released.join(",") || "no traffic"})` : "off"}`).join(" ")}`
+        );
+      }
+    } catch (e) {
+      console.warn(`Could not read flag targeting (non-fatal): ${e instanceof Error ? e.message : e}`);
+    }
+  }
   const rendered = buildPrSummary({
     state: runState(walk2, decision),
     reason: decision.reason,
@@ -40975,6 +41018,7 @@ async function main() {
     judgeScores,
     ...process.env.LD_APP_PROJECT_KEY ? { appProjectKey: process.env.LD_APP_PROJECT_KEY } : {},
     ...process.env.LD_BASE_URL ? { ldBaseUrl: process.env.LD_BASE_URL } : {},
+    ...flagState ? { flagState } : {},
     propose: proposeMode(),
     ...patchBody ? { patchBlock: patchBody } : {},
     ...reviewBody ? { review: reviewBody } : {},
