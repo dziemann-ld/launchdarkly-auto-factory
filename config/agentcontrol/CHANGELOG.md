@@ -15,6 +15,25 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-08-10 (fork: turn budgets raised after a live truncation)
+
+### ✅ Per-edge `max_turns` raised for the write-heavy nodes
+- **Why:** on `proj-launchpad` #93 the metrics author hit its 20-turn cap and ended
+  mid-sentence ("Now set routing tags and produce the chain output") — with its
+  metrics already created but its brief never written, so the chain halted before
+  Flag Testing and the reviewer never ran. Every tool call costs a turn, and the
+  write-heavy nodes all do read → edit → `run_tests` → fix → `run_tests` → commit.
+  Once `run_tests` actually executed a real ~500-test suite (rather than failing
+  instantly on a missing env var), 20 stopped being enough.
+- **Graph:** flag-implementer, metrics-author, flag-testing and code-reviewer
+  20/20/20/30 → **40**; manifest-steward 8 → **12**. The root keeps 30 via
+  `AUTOFACTORY_ROOT_MAX_TURNS`.
+- **Note:** `max_turns` is a ceiling, not a target — an agent stops when it is done,
+  so raising it costs nothing on runs that were already finishing and only affects
+  the ones that were being cut off.
+
+---
+
 ## 2026-08-07 (fork: tuned for proj-launchpad / `enablement-launchpad`)
 
 Fork-only (`dziemann-ld/launchdarkly-auto-factory`). Driven by the first two live
