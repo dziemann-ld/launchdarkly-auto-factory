@@ -15,6 +15,30 @@ Status legend: ✅ done · 🔜 planned/in progress
 
 ---
 
+## 2026-08-12 (fork: the testing agent must actually write tests)
+
+### ✅ New shim: `tests-authored`
+- **Why:** on `proj-launchpad` #107 the flag-testing node ended `completed` with empty
+  tags and a final message that DESCRIBED the tests it was about to write ("I'll write
+  flag-path tests that: 1... 2... 3...") without ever calling `write_file`. No turn cap
+  was hit, so the truncation halt didn't fire — and the run reported **success** with a
+  green check, having produced no tests. A previous run of the same PR had produced
+  three test files, so the work was silently lost between runs. A green check nobody
+  investigates is worse than a red one.
+- **Shim:** after the flag-testing node, when `flag_ready=true`, at least one test file
+  must appear among the AGENTS' changes. Detected in both git modes — uncommitted +
+  untracked via `status --porcelain` (propose), and AutoFactory-authored commits
+  (commit mode) — and deliberately NOT satisfied by a test the PR author wrote
+  themselves.
+- **Escape hatch:** `tests_not_needed=true` (new registry tag) is the honest way to
+  decline when the flagged path genuinely needs no new coverage. Declining explicitly
+  passes; declining silently fails.
+- **Instructions:** the flag-testing prompt now states that this is mechanically
+  enforced, and that planning aloud is not output. It already said "do NOT merely
+  describe or design the tests" — which is exactly why this belongs in a shim.
+
+---
+
 ## 2026-08-10 (fork: turn budgets raised after a live truncation)
 
 ### ✅ Per-edge `max_turns` raised for the write-heavy nodes

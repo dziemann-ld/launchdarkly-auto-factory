@@ -157,6 +157,16 @@
       ],
       "description": "pass | fail — the outcome of the LAST real run_tests execution in a node's run. Set automatically by run_tests. The deterministic handoff shim fails the run if a node hands off with a red suite."
     },
+    "tests_not_needed": {
+      "producedBy": "autofactory-flag-testing",
+      "production": "llm",
+      "role": "informational",
+      "edges": [],
+      "readBy": [
+        "verifier"
+      ],
+      "description": "true when the flagged path genuinely needs no new test coverage. The deterministic shim otherwise REQUIRES the flag-testing node to have written a test file when a flag was ready — it once ended `completed` having only described the tests it meant to write, and the run went green with none. This tag is the honest way to decline; omitting it while writing nothing fails the run."
+    },
     "sentry_guardrail": {
       "producedBy": "autofactory-metrics-author",
       "production": "llm",

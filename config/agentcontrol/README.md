@@ -94,6 +94,7 @@ the registry, the graph, and the instructions all agree.
 | `metric_event_keys` | metrics-author | comma-separated event keys of event-backed metrics (set automatically by `create_metric`; the deterministic handoff shim greps the code for an emitter of each; Sentry integration key `sentry-errors` is exempt) |
 | `sentry_guardrail` | metrics-author | `"true"` when a shared Sentry-backed LD metric was attached as the error killswitch — verifier checks for `launchdarklyContext` in the checkout (ADR 0014) |
 | `tests_last_run` | flag-testing | `pass`/`fail` — outcome of the last real `run_tests` execution (set automatically by `run_tests`; a `fail` at handoff mechanically fails the run) |
+| `tests_not_needed` | flag-testing | `true` when the flagged path genuinely needs no new coverage. A shim otherwise requires that the node actually WROTE a test file when a flag was ready — this tag is the honest way to decline; writing nothing without it fails the run |
 | `risk_level` | code-reviewer | `low` / `medium` / `high`; categorical companion to `risk_score` (fallback mapping when the score is missing) |
 | `risk_score` | research-planner | numeric `0.0`–`1.0`; in `risk-threshold` approval mode, steps gate when it meets the `auto-factory-risk-threshold` flag (fail-closed when absent) |
 

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { buildHandoffVerifier, filesContaining, type LdResourceWriter } from "@auto-factory/shared";
+import { buildHandoffVerifier, filesContaining, isTestPath, type LdResourceWriter } from "@auto-factory/shared";
 
 let root: string;
 
@@ -154,5 +155,117 @@ describe("filesContaining", () => {
     write("dist/miss.txt", "needle");
     write(".release-flags/pr-1.json", "needle");
     assert.deepEqual(filesContaining(root, "needle"), ["a/b/hit.txt"]);
+  });
+});
+
+/**
+ * Regression for the failure that slipped through as a SUCCESS: the flag-testing node
+ * ended `completed` with empty tags, having described the tests it intended to write
+ * ("I'll write flag-path tests that: 1… 2… 3…") without ever calling write_file. No
+ * turn cap was hit, so the truncation halt didn't fire, and the run went green having
+ * produced no tests at all.
+ */
+describe("handoff shims — the testing agent actually wrote tests", () => {
+  const git = (args: string[]) =>
+    execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+  /** A repo whose committed state includes the human's own test, but no agent work. */
+  function repoWithHumanTest(): void {
+    git(["init", "-q"]);
+    git(["config", "user.email", "human@example.com"]);
+    git(["config", "user.name", "A Human"]);
+    // References the flag key so the unrelated flag-wiring shim passes and `ok`
+    // reflects only the check under test here.
+    write("src/app.ts", "const on = await boolVariation('enable-x', user);\n");
+    write("src/human.test.ts", "it('human wrote this', () => {});\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "author's own work"]);
+  }
+
+  const verifyTesting = (tags: Record<string, string>) =>
+    buildHandoffVerifier({ sandboxRoot: root })({ configKey: "autofactory-flag-testing", tags });
+
+  it("FAILS when the node wrote nothing", async () => {
+    repoWithHumanTest();
+    const v = await verifyTesting({ flag_ready: "true", flag_key: "enable-x" });
+    const failure = v?.failures.find((f) => f.name === "tests-authored");
+    assert.ok(failure, "expected a tests-authored failure");
+    assert.match(failure.detail, /produced NO test file/);
+    assert.match(failure.detail, /Describing tests is not writing them/);
+    assert.equal(v?.ok, false);
+  });
+
+  it("is NOT satisfied by a test the PR author wrote themselves", async () => {
+    repoWithHumanTest();
+    // src/human.test.ts is committed by the human and must not count.
+    const v = await verifyTesting({ flag_ready: "true", flag_key: "enable-x" });
+    assert.equal(v?.passed.some((c) => c.name === "tests-authored"), false);
+  });
+
+  it("passes on an uncommitted agent test file (propose mode)", async () => {
+    repoWithHumanTest();
+    write("src/agent.test.ts", "it('agent wrote this', () => {});\n");
+    const v = await verifyTesting({ flag_ready: "true", flag_key: "enable-x" });
+    const ok = v?.passed.find((c) => c.name === "tests-authored");
+    assert.ok(ok, "expected tests-authored to pass");
+    assert.match(ok.detail, /src\/agent\.test\.ts/);
+    assert.equal(v?.ok, true);
+  });
+
+  it("passes on an agent-committed test file (commit mode)", async () => {
+    repoWithHumanTest();
+    write("src/agent.test.ts", "it('agent wrote this', () => {});\n");
+    git(["config", "user.email", "autofactory@launchdarkly.com"]);
+    git(["config", "user.name", "LaunchDarkly AutoFactory"]);
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "test(auto-factory): flag-path tests"]);
+    const v = await verifyTesting({ flag_ready: "true", flag_key: "enable-x" });
+    assert.ok(v?.passed.some((c) => c.name === "tests-authored"));
+  });
+
+  it("accepts an explicit tests_not_needed decline", async () => {
+    repoWithHumanTest();
+    const v = await verifyTesting({ flag_ready: "true", flag_key: "enable-x", tests_not_needed: "true" });
+    const ok = v?.passed.find((c) => c.name === "tests-authored");
+    assert.match(ok?.detail ?? "", /tests_not_needed/);
+    assert.equal(v?.ok, true);
+  });
+
+  it("does not apply when no flag was ready — nothing to test", async () => {
+    repoWithHumanTest();
+    const v = await verifyTesting({});
+    assert.equal(v, null);
+  });
+
+  it("does not apply to other nodes", async () => {
+    repoWithHumanTest();
+    const v = await buildHandoffVerifier({ sandboxRoot: root })({
+      configKey: "autofactory-metrics-author",
+      tags: { flag_ready: "true", flag_key: "enable-x" },
+    });
+    assert.equal(v?.failures.some((f) => f.name === "tests-authored"), false);
+  });
+});
+
+describe("isTestPath", () => {
+  it("recognizes the common conventions across languages", () => {
+    for (const p of [
+      "src/a.test.ts",
+      "src/a.spec.tsx",
+      "client/src/x.test.jsx",
+      "server/test_thing.py",
+      "pkg/thing_test.go",
+      "src/FooTest.java",
+      "tests/anything.ts",
+      "src/__tests__/a.ts",
+    ]) {
+      assert.equal(isTestPath(p), true, `expected ${p} to look like a test`);
+    }
+  });
+
+  it("does not mistake production files for tests", () => {
+    for (const p of ["src/app.ts", "src/latest.ts", "src/contest.py", "docs/testing.md", ".release-flags/pr-1.json"]) {
+      assert.equal(isTestPath(p), false, `expected ${p} NOT to look like a test`);
+    }
   });
 });

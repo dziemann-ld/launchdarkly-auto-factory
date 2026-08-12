@@ -22,8 +22,14 @@
  *    keys (ADR 0014), which are fed by Sentry→LD, not track().
  *  - `tests_last_run`           → the last real `run_tests` execution at this
  *    handoff was green.
+ *  - flag-testing + `flag_ready` → the node actually WROTE a test file. Observed
+ *    live: it ended `completed` with empty tags, having described the tests it was
+ *    about to write without ever calling write_file — no turn cap hit, so nothing
+ *    else caught it, and the run went green having produced none. An explicit
+ *    `tests_not_needed` tag is the honest way to opt out.
  */
 
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { LdResourceWriter } from "./anthropic/ldWriter.js";
@@ -51,6 +57,63 @@ export type HandoffVerifier = (run: {
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".venv", ".release-flags"]);
 const MAX_FILE_BYTES = 400_000;
 const VN_RE = /^v\d+$/;
+
+/**
+ * Does this path look like a test file? Deliberately broad and language-agnostic —
+ * the point is "did a test get written", not "does it match this repo's convention".
+ */
+export function isTestPath(path: string): boolean {
+  const p = path.replace(/\\/g, "/");
+  return (
+    /\.(test|spec)\.[cm]?[jt]sx?$/.test(p) || // foo.test.ts, foo.spec.tsx
+    /(^|\/)test_[^/]+\.py$/.test(p) || // test_foo.py
+    /_test\.(py|go|rb)$/.test(p) || // foo_test.go
+    /Tests?\.(java|kt|cs)$/.test(p) || // FooTest.java
+    /(^|\/)(tests?|__tests__|spec)\//.test(p) // anything under tests/, __tests__/
+  );
+}
+
+/**
+ * Files the AGENTS changed, in either git mode:
+ *  - propose/workingTree: uncommitted + untracked, via `status --porcelain`.
+ *  - push: their own commits, matched by the committer identity the tools use.
+ *
+ * Deliberately excludes the human's committed work, so "the agents wrote a test" can
+ * never be satisfied by a test the PR author wrote themselves.
+ */
+export function agentChangedFiles(root: string): string[] {
+  const out = new Set<string>();
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 20 * 1024 * 1024 });
+
+  try {
+    for (const line of git(["status", "--porcelain"]).split("\n")) {
+      // "XY path" or "XY old -> new" for renames.
+      const path = line.slice(3).trim();
+      if (!path) continue;
+      const renamed = path.split(" -> ").pop();
+      if (renamed) out.add(renamed);
+    }
+  } catch {
+    /* not a checkout, or git unavailable — fall through */
+  }
+  try {
+    const names = git([
+      "log",
+      "--author=LaunchDarkly AutoFactory",
+      "--name-only",
+      "--pretty=format:",
+      "-20",
+    ]);
+    for (const line of names.split("\n")) {
+      const path = line.trim();
+      if (path) out.add(path);
+    }
+  } catch {
+    /* no matching commits */
+  }
+  return [...out];
+}
 
 /** Repo-relative paths of text files containing `needle` (literal match). */
 export function filesContaining(root: string, needle: string): string[] {
@@ -214,6 +277,35 @@ export function buildHandoffVerifier(opts: HandoffVerifierOptions): HandoffVerif
       });
     } else if (t.tests_last_run === "pass") {
       passed.push({ name: "tests-green-at-handoff", detail: "last run_tests execution passed" });
+    }
+
+    // ---- The testing agent actually wrote something -----------------------
+    //
+    // The failure this catches, observed live: the flag-testing node ended
+    // `completed` with empty tags and a final message that described the tests it was
+    // about to write ("I'll write flag-path tests that: 1… 2… 3…") without ever
+    // calling write_file. No turn cap was hit, so the truncation halt didn't fire, and
+    // the run went GREEN having produced no tests. A green check nobody investigates
+    // is worse than a red one, which is precisely why this belongs in a shim rather
+    // than in the prompt — the prompt already says "do NOT merely describe the tests".
+    if (run.configKey.includes("flag-testing") && t.flag_ready === "true") {
+      if (t.tests_not_needed === "true") {
+        passed.push({
+          name: "tests-authored",
+          detail: "node reported tests_not_needed — no flagged path required new coverage",
+        });
+      } else {
+        const changed = agentChangedFiles(opts.sandboxRoot);
+        const tests = changed.filter(isTestPath);
+        check(
+          tests.length > 0,
+          "tests-authored",
+          `${tests.length} test file(s) written by the agents (${tests.slice(0, 3).join(", ")})`,
+          `the testing agent produced NO test file. Files it changed: ${changed.length ? changed.slice(0, 5).join(", ") : "(none)"}. ` +
+            `Describing tests is not writing them — call write_file/edit_file. If the flagged path genuinely needs no new ` +
+            `coverage, say so explicitly with tag_conversation({"tags": {"tests_not_needed": "true"}}) and explain why`,
+        );
+      }
     }
 
     if (passed.length === 0 && failures.length === 0) return null;

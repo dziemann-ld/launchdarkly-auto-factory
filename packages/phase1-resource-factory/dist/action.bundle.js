@@ -33240,7 +33240,7 @@ var init_sdk = __esm({
 });
 
 // src/action.ts
-import { execFileSync as execFileSync5 } from "node:child_process";
+import { execFileSync as execFileSync6 } from "node:child_process";
 import { existsSync as existsSync6, readFileSync as readFileSync9, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname as dirname5, join as join9, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36295,6 +36295,7 @@ import { promisify } from "node:util";
 var exec = promisify(execFile);
 
 // ../shared/dist/handoffVerifier.js
+import { execFileSync } from "node:child_process";
 import { readdirSync as readdirSync3, readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { join as join3 } from "node:path";
 
@@ -36305,6 +36306,45 @@ var SENTRY_INTEGRATION_EVENT_KEYS = /* @__PURE__ */ new Set(["sentry-errors"]);
 var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".venv", ".release-flags"]);
 var MAX_FILE_BYTES = 4e5;
 var VN_RE = /^v\d+$/;
+function isTestPath(path5) {
+  const p = path5.replace(/\\/g, "/");
+  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(p) || // foo.test.ts, foo.spec.tsx
+  /(^|\/)test_[^/]+\.py$/.test(p) || // test_foo.py
+  /_test\.(py|go|rb)$/.test(p) || // foo_test.go
+  /Tests?\.(java|kt|cs)$/.test(p) || // FooTest.java
+  /(^|\/)(tests?|__tests__|spec)\//.test(p);
+}
+function agentChangedFiles(root) {
+  const out = /* @__PURE__ */ new Set();
+  const git3 = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 20 * 1024 * 1024 });
+  try {
+    for (const line of git3(["status", "--porcelain"]).split("\n")) {
+      const path5 = line.slice(3).trim();
+      if (!path5)
+        continue;
+      const renamed = path5.split(" -> ").pop();
+      if (renamed)
+        out.add(renamed);
+    }
+  } catch {
+  }
+  try {
+    const names = git3([
+      "log",
+      "--author=LaunchDarkly AutoFactory",
+      "--name-only",
+      "--pretty=format:",
+      "-20"
+    ]);
+    for (const line of names.split("\n")) {
+      const path5 = line.trim();
+      if (path5)
+        out.add(path5);
+    }
+  } catch {
+  }
+  return [...out];
+}
 function filesContaining(root, needle) {
   const hits = [];
   const walk2 = (dir, rel) => {
@@ -36408,6 +36448,18 @@ function buildHandoffVerifier(opts) {
       });
     } else if (t.tests_last_run === "pass") {
       passed.push({ name: "tests-green-at-handoff", detail: "last run_tests execution passed" });
+    }
+    if (run.configKey.includes("flag-testing") && t.flag_ready === "true") {
+      if (t.tests_not_needed === "true") {
+        passed.push({
+          name: "tests-authored",
+          detail: "node reported tests_not_needed \u2014 no flagged path required new coverage"
+        });
+      } else {
+        const changed = agentChangedFiles(opts.sandboxRoot);
+        const tests = changed.filter(isTestPath);
+        check(tests.length > 0, "tests-authored", `${tests.length} test file(s) written by the agents (${tests.slice(0, 3).join(", ")})`, `the testing agent produced NO test file. Files it changed: ${changed.length ? changed.slice(0, 5).join(", ") : "(none)"}. Describing tests is not writing them \u2014 call write_file/edit_file. If the flagged path genuinely needs no new coverage, say so explicitly with tag_conversation({"tags": {"tests_not_needed": "true"}}) and explain why`);
+      }
     }
     if (passed.length === 0 && failures.length === 0)
       return null;
@@ -36679,7 +36731,7 @@ async function resolveAiProvider(ldClient, context, flagKey = PROVIDER_FLAG_KEY)
 }
 
 // ../shared/dist/anthropic/sandboxTools.js
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync as execFileSync2, spawnSync } from "node:child_process";
 import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync5, readdirSync as readdirSync4, statSync as statSync3, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative as relative2, resolve as resolve2, sep } from "node:path";
 
@@ -38628,7 +38680,7 @@ ${verdicts.join("\n")}` : "")
     return { content: `Edited ${rel}` };
   }
   runGit(args) {
-    return execFileSync("git", args, { cwd: this.root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync2("git", args, { cwd: this.root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   }
   /** Resolve the first base ref that exists locally, for a base...HEAD diff. */
   resolveBaseRef(base) {
@@ -38847,7 +38899,7 @@ import { join as join8 } from "node:path";
 
 // ../shared/dist/graph/assemble.js
 var import_yaml2 = __toESM(require_dist(), 1);
-import { execFileSync as execFileSync2, spawnSync as spawnSync2 } from "node:child_process";
+import { execFileSync as execFileSync3, spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync3, mkdtempSync, readFileSync as readFileSync6, readdirSync as readdirSync5, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as join7, resolve as resolve6 } from "node:path";
@@ -39170,7 +39222,7 @@ function parseServicesRegistry(yamlText) {
   return services;
 }
 function changedFilesInCheckout(sandboxRoot, prBaseRef) {
-  const git3 = (args) => execFileSync2("git", args, { cwd: sandboxRoot, encoding: "utf8", timeout: 3e4 });
+  const git3 = (args) => execFileSync3("git", args, { cwd: sandboxRoot, encoding: "utf8", timeout: 3e4 });
   const name = prBaseRef || process.env.PR_BASE_REF || "main";
   for (const ref of [`origin/${name}`, name, "origin/main", "main"]) {
     try {
@@ -40069,10 +40121,10 @@ ${evidence}`;
 }
 
 // ../shared/dist/judgeEvidence.js
-import { execFileSync as execFileSync3 } from "node:child_process";
+import { execFileSync as execFileSync4 } from "node:child_process";
 var MAX_EVIDENCE_CHARS = 24e3;
 function git(cwd, args) {
-  return execFileSync3("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return execFileSync4("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 function truncate2(s) {
   return s.length > MAX_EVIDENCE_CHARS ? `${s.slice(0, MAX_EVIDENCE_CHARS)}
@@ -40391,7 +40443,7 @@ function assemblePrContext() {
 }
 
 // src/proposal.ts
-import { execFileSync as execFileSync4 } from "node:child_process";
+import { execFileSync as execFileSync5 } from "node:child_process";
 var GH_HEADERS = (token) => ({
   Authorization: `Bearer ${token}`,
   Accept: "application/vnd.github+json",
@@ -40399,7 +40451,7 @@ var GH_HEADERS = (token) => ({
   "Content-Type": "application/json"
 });
 function git2(root, args) {
-  return execFileSync4("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 20 * 1024 * 1024 });
+  return execFileSync5("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 20 * 1024 * 1024 });
 }
 function rawProposedDiff(root) {
   try {
@@ -41000,7 +41052,7 @@ function flagCreationWriter() {
 }
 function checkoutHeadSha(root) {
   try {
-    return execFileSync5("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    return execFileSync6("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   } catch {
     return void 0;
   }
@@ -41021,7 +41073,7 @@ async function reviewManifestIntent(opts) {
         manifest.releaseIntent = rawIntent;
         writeFileSync2(abs, JSON.stringify(manifest, null, 2) + "\n", "utf8");
         try {
-          const git3 = (args) => execFileSync5("git", args, { cwd: opts.sandboxRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+          const git3 = (args) => execFileSync6("git", args, { cwd: opts.sandboxRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
           git3(["config", "user.email", "autofactory@launchdarkly.com"]);
           git3(["config", "user.name", "LaunchDarkly AutoFactory"]);
           git3(["add", rel]);
