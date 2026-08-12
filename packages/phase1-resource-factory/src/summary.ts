@@ -58,6 +58,21 @@ export interface SummaryInput {
   propose: boolean;
   /** Rendered `<details>` block for the proposed diff, or "". */
   patchBlock?: string;
+  /**
+   * How the agents' work was delivered, when it was. Propose mode's whole value
+   * depends on this being actionable: "apply with `git apply`" asked the reviewer to
+   * copy a diff out of a browser.
+   */
+  delivery?: {
+    /** Suggested changes posted as a review (Apply button, batchable). */
+    suggestions: number;
+    /** Stacked branch/PR carrying whatever couldn't be a suggestion. */
+    stacked?: { branch: string; prUrl?: string; files: string[] };
+    /** Why some changes couldn't be suggestions, deduped by reason. */
+    deferredReasons?: string[];
+    /** Set when the suggestion review failed to post at all. */
+    suggestionError?: string;
+  };
   /** Raw reviewer markdown, or "". */
   review?: string;
   repoProfile?: RepoProfile;
@@ -173,6 +188,34 @@ const HEADLINE: Record<RunState, { icon: string; title: string }> = {
   approved: { icon: "✅", title: "review passed" },
 };
 
+/**
+ * How to accept the agents' work, in the reader's terms. Names the concrete
+ * mechanism rather than a git incantation, and never implies a change was delivered
+ * when it wasn't.
+ */
+function applyInstruction(input: SuggestionInput): string {
+  const d = input.delivery;
+  if (!d) return "**Review the proposed changes below,**";
+  const parts: string[] = [];
+  if (d.suggestions > 0) {
+    parts.push(
+      `**Apply the ${d.suggestions} suggested change${d.suggestions === 1 ? "" : "s"}** in the Files changed tab (each has an *Apply* button; batch them into one commit)`,
+    );
+  }
+  if (d.stacked) {
+    parts.push(
+      d.stacked.prUrl
+        ? `**merge [the stacked PR](${d.stacked.prUrl})** for the ${d.stacked.files.length} file${d.stacked.files.length === 1 ? "" : "s"} that can't be suggestions`
+        : `**merge branch \`${d.stacked.branch}\`** for the ${d.stacked.files.length} file${d.stacked.files.length === 1 ? "" : "s"} that can't be suggestions`,
+    );
+  }
+  if (parts.length === 0) return "**Review the proposed changes below,**";
+  return `${parts.join(", then ")},`;
+}
+
+/** Narrow alias so applyInstruction reads independently of the full input. */
+type SuggestionInput = Pick<SummaryInput, "delivery">;
+
 /** The single most important line: what should the reader do now. */
 function nextAction(input: SummaryInput, counts: FindingCounts): string {
   const hasPatch = Boolean(input.patchBlock);
@@ -196,7 +239,9 @@ function nextAction(input: SummaryInput, counts: FindingCounts): string {
       }`;
     }
     case "approved": {
-      const lead = hasPatch ? "**Apply the proposed changes below** (`git apply`), then merge as usual." : "**Ready to merge.**";
+      // "then merge this PR" — with a stacked PR in play, a bare "merge as usual"
+      // leaves the reader guessing which of the two PRs is meant.
+      const lead = hasPatch ? `${applyInstruction(input)} then merge this PR as usual.` : "**Ready to merge.**";
       const live = liveEnvironments(input.flagState);
       // Only claim the flag is dark when LaunchDarkly actually says so. If it is
       // already serving somewhere, that is the reviewer's business — flag it.
@@ -236,9 +281,20 @@ function factRows(input: SummaryInput, counts: FindingCounts): string[] {
   }
   if (input.patchBlock) {
     const files = countPatchFiles(input.patchBlock);
+    const d = input.delivery;
+    // Say HOW to take the work, not just how much of it there is.
+    const how: string[] = [];
+    if (d?.suggestions) how.push(`${d.suggestions} as suggested change${d.suggestions === 1 ? "" : "s"}`);
+    if (d?.stacked) how.push(d.stacked.prUrl ? `${d.stacked.files.length} in a [stacked PR](${d.stacked.prUrl})` : `${d.stacked.files.length} on \`${d.stacked.branch}\``);
     rows.push(
-      `| **Changes** | ${files ? `${files} file${files === 1 ? "" : "s"}` : "proposed"} — **not committed**, apply the diff below |`,
+      `| **Changes** | ${files ? `${files} file${files === 1 ? "" : "s"}` : "proposed"}, **not committed**${how.length ? ` — ${how.join(", ")}` : " — see the diff below"} |`,
     );
+    if (d?.deferredReasons?.length) {
+      rows.push(`| **Why not all suggestions** | ${d.deferredReasons.join("; ")} |`);
+    }
+    if (d?.suggestionError) {
+      rows.push(`| **⚠ Suggestions** | could not be posted (${d.suggestionError}) — everything is on the branch instead |`);
+    }
   } else if (input.propose && input.state !== "no-flag") {
     rows.push("| **Changes** | none proposed |");
   }

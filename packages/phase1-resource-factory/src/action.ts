@@ -61,7 +61,9 @@ import { postCheckRun } from "./checkRun.js";
 import { postPrComment } from "./comment.js";
 import { approveLabel, ensureLabel, fetchApprovalActor, fetchApprovedSteps } from "./labels.js";
 import { type PrContext, assemblePrContext } from "./prContext.js";
-import { type RunState, buildPrSummary } from "./summary.js";
+import { changedPaths, postSuggestionReview, publishStackedProposal, rawProposedDiff } from "./proposal.js";
+import { commentableLines, parseUnifiedDiff, planSuggestions } from "./suggestions.js";
+import { type RunState, type SummaryInput, buildPrSummary } from "./summary.js";
 
 /**
  * Use the real GraphQL transport when VEGA_ENDPOINT + VEGA_TOKEN are set; else
@@ -361,19 +363,83 @@ function proposeMode(): boolean {
 }
 
 /**
- * The uncommitted diff the agents left in the checkout, rendered for the PR.
- * Returns "" when nothing changed (or the checkout can't be read).
+ * Deliver the agents' uncommitted work so a reviewer can accept it in a click:
+ * suggested changes for edits to existing lines, a stacked PR for everything else.
+ * The two sets are disjoint, so nothing can be applied twice.
  */
-function proposedPatch(root: string): string {
-  let diff = "";
-  try {
-    execFileSync("git", ["add", "-A", "--intent-to-add"], { cwd: root, stdio: "ignore" });
-    diff = execFileSync("git", ["diff", "HEAD"], { cwd: root, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }).trim();
-  } catch (e) {
-    console.warn(`Could not read the proposed diff (non-fatal): ${e instanceof Error ? e.message : e}`);
-    return "";
+async function deliverProposal(
+  root: string,
+  context: PrContext,
+  rawDiff: string,
+): Promise<SummaryInput["delivery"]> {
+  const token = process.env.GITHUB_TOKEN;
+  const repo = context.REPO;
+  const prNumber = context.PR_NUMBER;
+  const prBranch = process.env.PR_BRANCH;
+  if (!token || !repo || !prNumber) {
+    console.log("(proposal delivery skipped — missing token / repo / PR number)");
+    return undefined;
   }
-  if (!diff) return "";
+
+  const files = parseUnifiedDiff(rawDiff);
+  const prFiles = await fetchPrFiles(repo, prNumber, token);
+  const plan = planSuggestions(files, commentableLines(prFiles), "AutoFactory proposes this change.");
+  console.log(`Proposal: ${plan.comments.length} suggestion(s), ${plan.deferred.length} deferred.`);
+  for (const d of plan.deferred) console.log(`  defer ${d.path}: ${d.reason}`);
+
+  const review = await postSuggestionReview(
+    repo,
+    prNumber,
+    token,
+    plan.comments,
+    "AutoFactory proposed the changes below. Each has an **Apply** button — use *Add suggestion to batch* to take them in one commit.",
+  );
+
+  // Suggestion paths only stay off the branch if the review actually landed.
+  const suggestionPaths = new Set(plan.comments.map((c) => c.path));
+  const all = changedPaths(root);
+  const branchPaths = review.error ? all : all.filter((p) => !suggestionPaths.has(p));
+
+  const stacked = prBranch
+    ? await publishStackedProposal({
+        root,
+        repo,
+        prNumber,
+        prBranch,
+        token,
+        paths: branchPaths,
+        body:
+          `Proposed by AutoFactory for #${prNumber}: the changes that cannot be expressed as GitHub suggestions ` +
+          `(new files, and edits outside the lines that PR's diff exposes).\n\n` +
+          `Merging this lands them on \`${prBranch}\`. Nothing here is applied until you merge.\n\n` +
+          `🤖 Generated with [Claude Code](https://claude.com/claude-code)`,
+      })
+    : undefined;
+
+  const reasons = [...new Set(plan.deferred.map((d) => d.reason))];
+  return {
+    suggestions: review.posted,
+    ...(stacked ? { stacked: { branch: stacked.branch, ...(stacked.prUrl ? { prUrl: stacked.prUrl } : {}), files: stacked.files } } : {}),
+    ...(reasons.length ? { deferredReasons: reasons } : {}),
+    ...(review.error ? { suggestionError: review.error } : {}),
+  };
+}
+
+/** The PR's changed files, for mapping suggestions onto its diff. */
+async function fetchPrFiles(repo: string, prNumber: string, token: string): Promise<Array<{ filename: string; patch?: string }>> {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/files?per_page=100`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+    });
+    if (!res.ok) return [];
+    return (await res.json()) as Array<{ filename: string; patch?: string }>;
+  } catch {
+    return [];
+  }
+}
+
+/** The proposed diff, collapsed, for reading. Delivery is handled separately. */
+function renderPatchBlock(diff: string): string {
   const clipped =
     diff.length > PATCH_BODY_LIMIT
       ? `${diff.slice(0, PATCH_BODY_LIMIT)}\n\n[truncated — the full patch is in the Actions log]`
@@ -383,7 +449,7 @@ function proposedPatch(root: string): string {
   // view. The facts table says how many files and points down here.
   return [
     "<details>",
-    "<summary><b>Proposed changes</b> · apply with <code>git apply</code></summary>",
+    "<summary><b>Proposed changes</b> · for reading; apply them via the suggestions or the stacked PR above</summary>",
     "",
     "```diff",
     clipped,
@@ -744,7 +810,10 @@ async function main(): Promise<void> {
   // carried only a verdict and a tag table, so the reasoning lived in the Actions
   // log where nobody reads it. A real production bug found on PR #26 merged anyway.
   const reviewBody = reviewFindings(walk.runs);
-  const patchBody = proposeMode() ? proposedPatch(sandboxRoot) : "";
+  // Read the diff BEFORE any git state is touched below (the stacked branch commits).
+  const rawDiff = proposeMode() ? rawProposedDiff(sandboxRoot) : "";
+  const patchBody = rawDiff ? renderPatchBlock(rawDiff) : "";
+  const delivery = rawDiff ? await deliverProposal(sandboxRoot, context, rawDiff) : undefined;
 
   // Read the flag's ACTUAL per-environment targeting so the summary can state it
   // instead of assuming it. Best-effort: a read failure leaves it undefined and the
@@ -781,6 +850,7 @@ async function main(): Promise<void> {
     ...(flagState ? { flagState } : {}),
     propose: proposeMode(),
     ...(patchBody ? { patchBlock: patchBody } : {}),
+    ...(delivery ? { delivery } : {}),
     ...(reviewBody ? { review: reviewBody } : {}),
     ...(repoProfile ? { repoProfile } : {}),
     approvalMode: policy.mode,

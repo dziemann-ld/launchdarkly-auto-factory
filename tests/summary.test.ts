@@ -121,8 +121,10 @@ describe("buildPrSummary — approved with a proposed patch", () => {
     runs: [run("autofactory-code-reviewer", { review_approved: "true" })],
   });
 
-  it("tells the reader to apply the diff, not just that it passed", () => {
-    assert.match(rendered.comment, /\*\*Apply the proposed changes below\*\*/);
+  it("tells the reader how to take the work, not just that it passed", () => {
+    // With no delivery mechanism recorded, it must not imply one exists.
+    assert.match(rendered.comment, /\*\*Review the proposed changes below,\*\*/);
+    assert.doesNotMatch(rendered.comment, /git apply/);
   });
 
   it("links the flag into LaunchDarkly", () => {
@@ -136,7 +138,7 @@ describe("buildPrSummary — approved with a proposed patch", () => {
 
   it("summarizes metrics, changed-file count, and review severity in the facts table", () => {
     assert.match(rendered.comment, /\| \*\*Metrics\*\* \| `m-error`, `m-latency` \|/);
-    assert.match(rendered.comment, /\| \*\*Changes\*\* \| 2 files — \*\*not committed\*\*/);
+    assert.match(rendered.comment, /\| \*\*Changes\*\* \| 2 files, \*\*not committed\*\*/);
     assert.match(rendered.comment, /\| \*\*Review\*\* \| 1 warning \|/);
   });
 
@@ -216,6 +218,70 @@ describe("buildPrSummary — flag targeting is read, never assumed", () => {
   it("shows the empty-string variation legibly", () => {
     const r = buildPrSummary({ ...withFlag, flagState: state({ production: env(true, [""]) }) });
     assert.match(r.comment, /`""`/);
+  });
+});
+
+/**
+ * Propose mode is only worth anything if the reviewer can accept the work. The
+ * original copy said "apply with `git apply`" for a diff that existed solely as text
+ * in a browser — so these tests pin that the comment names a real mechanism, and that
+ * a change which couldn't be delivered the nice way is never silently dropped.
+ */
+describe("buildPrSummary — how to apply the proposal", () => {
+  const patch = ["<details>", "```diff", "diff --git a/a.ts b/a.ts", "diff --git a/b.test.ts b/b.test.ts", "```", "</details>"].join("\n");
+  const withPatch = { ...base, patchBlock: patch };
+
+  it("points at the Apply button when everything became a suggestion", () => {
+    const r = buildPrSummary({ ...withPatch, delivery: { suggestions: 3 } });
+    assert.match(r.comment, /\*\*Apply the 3 suggested changes\*\* in the Files changed tab/);
+    assert.match(r.comment, /batch them into one commit/);
+    assert.match(r.comment, /\| \*\*Changes\*\* \| 2 files, \*\*not committed\*\* — 3 as suggested changes \|/);
+  });
+
+  it("points at the stacked PR for work that can't be a suggestion", () => {
+    const r = buildPrSummary({
+      ...withPatch,
+      delivery: {
+        suggestions: 0,
+        stacked: { branch: "autofactory/pr-107", prUrl: "https://github.com/o/r/pull/108", files: ["a.test.ts", "b.json"] },
+        deferredReasons: ["new file — a suggestion can only replace existing lines"],
+      },
+    });
+    assert.match(r.comment, /\*\*merge \[the stacked PR\]\(https:\/\/github\.com\/o\/r\/pull\/108\)\*\* for the 2 files/);
+    // The reader is told WHY the nicer path wasn't available.
+    assert.match(r.comment, /\| \*\*Why not all suggestions\*\* \| new file/);
+  });
+
+  it("describes both mechanisms when the work is split", () => {
+    const r = buildPrSummary({
+      ...withPatch,
+      delivery: {
+        suggestions: 2,
+        stacked: { branch: "autofactory/pr-9", prUrl: "https://github.com/o/r/pull/10", files: ["n.test.ts"] },
+      },
+    });
+    assert.match(r.comment, /Apply the 2 suggested changes.*then.*merge \[the stacked PR\]/s);
+    assert.match(r.comment, /2 as suggested changes, 1 in a \[stacked PR\]/);
+  });
+
+  it("falls back to the branch name when no PR could be opened", () => {
+    const r = buildPrSummary({ ...withPatch, delivery: { suggestions: 0, stacked: { branch: "autofactory/pr-5", files: ["x.ts"] } } });
+    assert.match(r.comment, /\*\*merge branch `autofactory\/pr-5`\*\*/);
+  });
+
+  it("says so loudly when the suggestion review failed to post", () => {
+    const r = buildPrSummary({
+      ...withPatch,
+      delivery: { suggestions: 0, suggestionError: "HTTP 422", stacked: { branch: "autofactory/pr-5", files: ["x.ts", "y.ts"] } },
+    });
+    assert.match(r.comment, /could not be posted \(HTTP 422\) — everything is on the branch instead/);
+  });
+
+  it("never tells anyone to run git apply", () => {
+    for (const d of [undefined, { suggestions: 1 }, { suggestions: 0, stacked: { branch: "b", files: ["f"] } }]) {
+      const r = buildPrSummary({ ...withPatch, ...(d ? { delivery: d } : {}) });
+      assert.doesNotMatch(r.comment, /git apply/);
+    }
   });
 });
 

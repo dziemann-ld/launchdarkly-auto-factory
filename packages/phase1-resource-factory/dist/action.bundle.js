@@ -33240,7 +33240,7 @@ var init_sdk = __esm({
 });
 
 // src/action.ts
-import { execFileSync as execFileSync4 } from "node:child_process";
+import { execFileSync as execFileSync5 } from "node:child_process";
 import { existsSync as existsSync6, readFileSync as readFileSync9, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname as dirname5, join as join9, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39170,12 +39170,12 @@ function parseServicesRegistry(yamlText) {
   return services;
 }
 function changedFilesInCheckout(sandboxRoot, prBaseRef) {
-  const git2 = (args) => execFileSync2("git", args, { cwd: sandboxRoot, encoding: "utf8", timeout: 3e4 });
+  const git3 = (args) => execFileSync2("git", args, { cwd: sandboxRoot, encoding: "utf8", timeout: 3e4 });
   const name = prBaseRef || process.env.PR_BASE_REF || "main";
   for (const ref of [`origin/${name}`, name, "origin/main", "main"]) {
     try {
-      git2(["rev-parse", "--verify", "--quiet", ref]);
-      return git2(["diff", "--name-only", `${ref}...HEAD`]).split("\n").map((l) => l.trim()).filter(Boolean);
+      git3(["rev-parse", "--verify", "--quiet", ref]);
+      return git3(["diff", "--name-only", `${ref}...HEAD`]).split("\n").map((l) => l.trim()).filter(Boolean);
     } catch {
     }
   }
@@ -40390,6 +40390,295 @@ function assemblePrContext() {
   return ctx;
 }
 
+// src/proposal.ts
+import { execFileSync as execFileSync4 } from "node:child_process";
+var GH_HEADERS = (token) => ({
+  Authorization: `Bearer ${token}`,
+  Accept: "application/vnd.github+json",
+  "X-GitHub-Api-Version": "2022-11-28",
+  "Content-Type": "application/json"
+});
+function git2(root, args) {
+  return execFileSync4("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 20 * 1024 * 1024 });
+}
+function rawProposedDiff(root) {
+  try {
+    git2(root, ["add", "-A", "-N"]);
+    return git2(root, ["diff", "HEAD"]).trim();
+  } catch (e) {
+    console.warn(`Could not read the proposed diff (non-fatal): ${e instanceof Error ? e.message : e}`);
+    return "";
+  }
+}
+function changedPaths(root) {
+  try {
+    git2(root, ["add", "-A", "-N"]);
+    return git2(root, ["diff", "--name-only", "HEAD"]).split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function postSuggestionReview(repo, prNumber, token, comments, intro) {
+  if (comments.length === 0) return { posted: 0 };
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/reviews`, {
+      method: "POST",
+      headers: GH_HEADERS(token),
+      body: JSON.stringify({
+        event: "COMMENT",
+        body: intro,
+        comments: comments.map((c) => ({
+          path: c.path,
+          line: c.line,
+          side: c.side,
+          ...c.start_line !== void 0 ? { start_line: c.start_line, start_side: c.side } : {},
+          body: c.body
+        }))
+      })
+    });
+    if (res.ok) {
+      console.log(`Posted ${comments.length} suggested change(s) as a review.`);
+      return { posted: comments.length };
+    }
+    const detail = (await res.text()).slice(0, 300);
+    console.warn(`Suggested-changes review failed: HTTP ${res.status} ${detail}`);
+    return { posted: 0, error: `HTTP ${res.status}` };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`Suggested-changes review error: ${msg}`);
+    return { posted: 0, error: msg };
+  }
+}
+async function publishStackedProposal(opts) {
+  const { root, repo, prNumber, prBranch, token, paths, body } = opts;
+  if (paths.length === 0) return void 0;
+  const branch = `autofactory/pr-${prNumber}`;
+  try {
+    git2(root, ["config", "user.email", "autofactory@launchdarkly.com"]);
+    git2(root, ["config", "user.name", "LaunchDarkly AutoFactory"]);
+    git2(root, ["checkout", "-B", branch]);
+    git2(root, ["reset"]);
+    git2(root, ["add", "--", ...paths]);
+    const staged = git2(root, ["diff", "--cached", "--name-only"]).trim();
+    if (!staged) {
+      console.log("Stacked proposal: nothing to commit.");
+      return void 0;
+    }
+    git2(root, ["commit", "-q", "-m", `chore(auto-factory): proposed changes for #${prNumber}
+
+[skip ci]`]);
+    git2(root, ["push", "--force", "origin", `HEAD:refs/heads/${branch}`]);
+    console.log(`Pushed stacked proposal to '${branch}' (${staged.split("\n").length} file(s)).`);
+  } catch (e) {
+    console.warn(`Could not push the stacked proposal (non-fatal): ${e instanceof Error ? e.message : e}`);
+    return void 0;
+  }
+  const files = paths.slice();
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+      method: "POST",
+      headers: GH_HEADERS(token),
+      body: JSON.stringify({
+        title: `AutoFactory: proposed changes for #${prNumber}`,
+        head: branch,
+        base: prBranch,
+        body,
+        maintainer_can_modify: true
+      })
+    });
+    if (res.ok) {
+      const pr = await res.json();
+      console.log(`Opened stacked PR ${pr.html_url ?? "(url unknown)"} into '${prBranch}'.`);
+      return { branch, files, ...pr.html_url ? { prUrl: pr.html_url } : {}, ...pr.number ? { prNumber: pr.number } : {} };
+    }
+    if (res.status === 422) {
+      const owner = repo.split("/")[0];
+      const list = await fetch(`https://api.github.com/repos/${repo}/pulls?head=${owner}:${branch}&state=open`, {
+        headers: GH_HEADERS(token)
+      });
+      if (list.ok) {
+        const open3 = await list.json();
+        const existing = open3[0];
+        if (existing) {
+          console.log(`Stacked PR already open: ${existing.html_url} (updated by force-push).`);
+          return {
+            branch,
+            files,
+            ...existing.html_url ? { prUrl: existing.html_url } : {},
+            ...existing.number ? { prNumber: existing.number } : {}
+          };
+        }
+      }
+    }
+    console.warn(`Could not open the stacked PR: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+  } catch (e) {
+    console.warn(`Stacked PR error (non-fatal): ${e instanceof Error ? e.message : e}`);
+  }
+  return { branch, files };
+}
+
+// src/suggestions.ts
+var HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+function parseUnifiedDiff(diff) {
+  const files = [];
+  let current;
+  let hunk;
+  for (const line of diff.split("\n")) {
+    const header = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (header) {
+      current = { path: header[2], isNew: false, isDelete: false, hunks: [] };
+      files.push(current);
+      hunk = void 0;
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith("new file mode")) {
+      current.isNew = true;
+      continue;
+    }
+    if (line.startsWith("deleted file mode")) {
+      current.isDelete = true;
+      continue;
+    }
+    const h = HUNK_RE.exec(line);
+    if (h) {
+      hunk = { oldStart: Number(h[1]), newStart: Number(h[3]), lines: [] };
+      current.hunks.push(hunk);
+      continue;
+    }
+    if (!hunk) continue;
+    if (line.startsWith(" ") || line.startsWith("-") || line.startsWith("+") || line.startsWith("\\")) {
+      hunk.lines.push(line);
+    }
+  }
+  return files;
+}
+function commentableLines(prFiles) {
+  const map = /* @__PURE__ */ new Map();
+  for (const f of prFiles) {
+    const lines = /* @__PURE__ */ new Set();
+    if (f.patch) {
+      let newLine = 0;
+      for (const l of f.patch.split("\n")) {
+        const h = HUNK_RE.exec(l);
+        if (h) {
+          newLine = Number(h[3]);
+          continue;
+        }
+        if (l.startsWith("+") || l.startsWith(" ")) {
+          lines.add(newLine);
+          newLine += 1;
+        }
+      }
+    }
+    map.set(f.filename, lines);
+  }
+  return map;
+}
+function changeGroups(hunk) {
+  const groups = [];
+  let oldLine = hunk.oldStart;
+  let lastContext;
+  let open3;
+  const close = () => {
+    if (open3) groups.push(open3);
+    open3 = void 0;
+  };
+  for (const raw of hunk.lines) {
+    if (raw.startsWith("\\")) continue;
+    const kind = raw[0];
+    const text = raw.slice(1);
+    if (kind === " ") {
+      close();
+      lastContext = { line: oldLine, text };
+      oldLine += 1;
+      continue;
+    }
+    if (!open3) open3 = { removed: [], added: [], ...lastContext ? { anchor: lastContext } : {} };
+    if (kind === "-") {
+      open3.removed.push(oldLine);
+      oldLine += 1;
+    } else if (kind === "+") {
+      open3.added.push(text);
+    }
+  }
+  close();
+  return groups;
+}
+function rangeIsCommentable(set, a, b) {
+  if (!set) return false;
+  for (let i = a; i <= b; i++) if (!set.has(i)) return false;
+  return true;
+}
+function suggestionBody(explanation, content) {
+  return [explanation, "", "```suggestion", ...content, "```"].join("\n");
+}
+function planSuggestions(files, commentable, explanation = "AutoFactory proposes this change.") {
+  const comments = [];
+  const deferred = [];
+  for (const file of files) {
+    if (file.isNew) {
+      deferred.push({ path: file.path, reason: "new file \u2014 a suggestion can only replace existing lines" });
+      continue;
+    }
+    if (file.isDelete) {
+      deferred.push({ path: file.path, reason: "file deletion \u2014 cannot be expressed as a suggestion" });
+      continue;
+    }
+    if (!commentable.has(file.path)) {
+      deferred.push({ path: file.path, reason: "file is not part of this PR's diff" });
+      continue;
+    }
+    const set = commentable.get(file.path);
+    if (set && set.size === 0) {
+      deferred.push({ path: file.path, reason: "GitHub exposes no diff for this file (too large or binary)" });
+      continue;
+    }
+    let deferredHere = 0;
+    for (const hunk of file.hunks) {
+      for (const g of changeGroups(hunk)) {
+        if (g.removed.length > 0) {
+          const start = g.removed[0];
+          const end = g.removed[g.removed.length - 1];
+          if (!rangeIsCommentable(set, start, end)) {
+            deferredHere += 1;
+            continue;
+          }
+          comments.push({
+            path: file.path,
+            ...start !== end ? { start_line: start } : {},
+            line: end,
+            side: "RIGHT",
+            body: suggestionBody(explanation, g.added)
+          });
+          continue;
+        }
+        if (!g.anchor) {
+          deferredHere += 1;
+          continue;
+        }
+        if (!rangeIsCommentable(set, g.anchor.line, g.anchor.line)) {
+          deferredHere += 1;
+          continue;
+        }
+        comments.push({
+          path: file.path,
+          line: g.anchor.line,
+          side: "RIGHT",
+          body: suggestionBody(explanation, [g.anchor.text, ...g.added])
+        });
+      }
+    }
+    if (deferredHere > 0) {
+      deferred.push({
+        path: file.path,
+        reason: `${deferredHere} change${deferredHere === 1 ? "" : "s"} fall outside the lines this PR's diff exposes`
+      });
+    }
+  }
+  return { comments, deferred };
+}
+
 // src/summary.ts
 function countFindings(review) {
   const counts = { blocking: 0, warnings: 0, notes: 0 };
@@ -40437,6 +40726,23 @@ var HEADLINE = {
   rejected: { icon: "\u274C", title: "changes requested" },
   approved: { icon: "\u2705", title: "review passed" }
 };
+function applyInstruction(input) {
+  const d = input.delivery;
+  if (!d) return "**Review the proposed changes below,**";
+  const parts = [];
+  if (d.suggestions > 0) {
+    parts.push(
+      `**Apply the ${d.suggestions} suggested change${d.suggestions === 1 ? "" : "s"}** in the Files changed tab (each has an *Apply* button; batch them into one commit)`
+    );
+  }
+  if (d.stacked) {
+    parts.push(
+      d.stacked.prUrl ? `**merge [the stacked PR](${d.stacked.prUrl})** for the ${d.stacked.files.length} file${d.stacked.files.length === 1 ? "" : "s"} that can't be suggestions` : `**merge branch \`${d.stacked.branch}\`** for the ${d.stacked.files.length} file${d.stacked.files.length === 1 ? "" : "s"} that can't be suggestions`
+    );
+  }
+  if (parts.length === 0) return "**Review the proposed changes below,**";
+  return `${parts.join(", then ")},`;
+}
 function nextAction(input, counts) {
   const hasPatch = Boolean(input.patchBlock);
   switch (input.state) {
@@ -40457,7 +40763,7 @@ function nextAction(input, counts) {
       return `**Start with the ${what} under _Code review_ below.** ${hasPatch ? "The proposed changes are included but not applied." : "Nothing was merged or applied."}`;
     }
     case "approved": {
-      const lead = hasPatch ? "**Apply the proposed changes below** (`git apply`), then merge as usual." : "**Ready to merge.**";
+      const lead = hasPatch ? `${applyInstruction(input)} then merge this PR as usual.` : "**Ready to merge.**";
       const live = liveEnvironments(input.flagState);
       if (live.length > 0) {
         return `${lead} \u26A0\uFE0F Note: this flag is **already live** in ${live.map((e) => `\`${e}\``).join(", ")} \u2014 merging changes behavior there immediately, not on release.`;
@@ -40486,9 +40792,19 @@ function factRows(input, counts) {
   }
   if (input.patchBlock) {
     const files = countPatchFiles(input.patchBlock);
+    const d = input.delivery;
+    const how = [];
+    if (d?.suggestions) how.push(`${d.suggestions} as suggested change${d.suggestions === 1 ? "" : "s"}`);
+    if (d?.stacked) how.push(d.stacked.prUrl ? `${d.stacked.files.length} in a [stacked PR](${d.stacked.prUrl})` : `${d.stacked.files.length} on \`${d.stacked.branch}\``);
     rows.push(
-      `| **Changes** | ${files ? `${files} file${files === 1 ? "" : "s"}` : "proposed"} \u2014 **not committed**, apply the diff below |`
+      `| **Changes** | ${files ? `${files} file${files === 1 ? "" : "s"}` : "proposed"}, **not committed**${how.length ? ` \u2014 ${how.join(", ")}` : " \u2014 see the diff below"} |`
     );
+    if (d?.deferredReasons?.length) {
+      rows.push(`| **Why not all suggestions** | ${d.deferredReasons.join("; ")} |`);
+    }
+    if (d?.suggestionError) {
+      rows.push(`| **\u26A0 Suggestions** | could not be posted (${d.suggestionError}) \u2014 everything is on the branch instead |`);
+    }
   } else if (input.propose && input.state !== "no-flag") {
     rows.push("| **Changes** | none proposed |");
   }
@@ -40669,7 +40985,7 @@ function flagCreationWriter() {
 }
 function checkoutHeadSha(root) {
   try {
-    return execFileSync4("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    return execFileSync5("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   } catch {
     return void 0;
   }
@@ -40690,16 +41006,16 @@ async function reviewManifestIntent(opts) {
         manifest.releaseIntent = rawIntent;
         writeFileSync2(abs, JSON.stringify(manifest, null, 2) + "\n", "utf8");
         try {
-          const git2 = (args) => execFileSync4("git", args, { cwd: opts.sandboxRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-          git2(["config", "user.email", "autofactory@launchdarkly.com"]);
-          git2(["config", "user.name", "LaunchDarkly AutoFactory"]);
-          git2(["add", rel]);
-          if (git2(["diff", "--cached", "--name-only"]).trim()) {
-            git2(["commit", "-m", `chore(auto-factory): record approvedBy=${actor} in ${rel}
+          const git3 = (args) => execFileSync5("git", args, { cwd: opts.sandboxRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+          git3(["config", "user.email", "autofactory@launchdarkly.com"]);
+          git3(["config", "user.name", "LaunchDarkly AutoFactory"]);
+          git3(["add", rel]);
+          if (git3(["diff", "--cached", "--name-only"]).trim()) {
+            git3(["commit", "-m", `chore(auto-factory): record approvedBy=${actor} in ${rel}
 
 [skip ci]`]);
             const branch = opts.prBranch ?? process.env.PR_BRANCH;
-            git2(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
+            git3(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
             console.log(`Release intent: recorded approvedBy=${actor} in ${rel}.`);
           }
         } catch (e) {
@@ -40756,22 +41072,69 @@ function proposeMode() {
   const v = (process.env.AUTOFACTORY_APPLY_MODE ?? "").toLowerCase();
   return v === "propose" || v === "suggest";
 }
-function proposedPatch(root) {
-  let diff = "";
-  try {
-    execFileSync4("git", ["add", "-A", "--intent-to-add"], { cwd: root, stdio: "ignore" });
-    diff = execFileSync4("git", ["diff", "HEAD"], { cwd: root, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }).trim();
-  } catch (e) {
-    console.warn(`Could not read the proposed diff (non-fatal): ${e instanceof Error ? e.message : e}`);
-    return "";
+async function deliverProposal(root, context, rawDiff) {
+  const token = process.env.GITHUB_TOKEN;
+  const repo = context.REPO;
+  const prNumber = context.PR_NUMBER;
+  const prBranch = process.env.PR_BRANCH;
+  if (!token || !repo || !prNumber) {
+    console.log("(proposal delivery skipped \u2014 missing token / repo / PR number)");
+    return void 0;
   }
-  if (!diff) return "";
+  const files = parseUnifiedDiff(rawDiff);
+  const prFiles = await fetchPrFiles(repo, prNumber, token);
+  const plan = planSuggestions(files, commentableLines(prFiles), "AutoFactory proposes this change.");
+  console.log(`Proposal: ${plan.comments.length} suggestion(s), ${plan.deferred.length} deferred.`);
+  for (const d of plan.deferred) console.log(`  defer ${d.path}: ${d.reason}`);
+  const review = await postSuggestionReview(
+    repo,
+    prNumber,
+    token,
+    plan.comments,
+    "AutoFactory proposed the changes below. Each has an **Apply** button \u2014 use *Add suggestion to batch* to take them in one commit."
+  );
+  const suggestionPaths = new Set(plan.comments.map((c) => c.path));
+  const all = changedPaths(root);
+  const branchPaths = review.error ? all : all.filter((p) => !suggestionPaths.has(p));
+  const stacked = prBranch ? await publishStackedProposal({
+    root,
+    repo,
+    prNumber,
+    prBranch,
+    token,
+    paths: branchPaths,
+    body: `Proposed by AutoFactory for #${prNumber}: the changes that cannot be expressed as GitHub suggestions (new files, and edits outside the lines that PR's diff exposes).
+
+Merging this lands them on \`${prBranch}\`. Nothing here is applied until you merge.
+
+\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)`
+  }) : void 0;
+  const reasons = [...new Set(plan.deferred.map((d) => d.reason))];
+  return {
+    suggestions: review.posted,
+    ...stacked ? { stacked: { branch: stacked.branch, ...stacked.prUrl ? { prUrl: stacked.prUrl } : {}, files: stacked.files } } : {},
+    ...reasons.length ? { deferredReasons: reasons } : {},
+    ...review.error ? { suggestionError: review.error } : {}
+  };
+}
+async function fetchPrFiles(repo, prNumber, token) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/files?per_page=100`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" }
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+function renderPatchBlock(diff) {
   const clipped = diff.length > PATCH_BODY_LIMIT ? `${diff.slice(0, PATCH_BODY_LIMIT)}
 
 [truncated \u2014 the full patch is in the Actions log]` : diff;
   return [
     "<details>",
-    "<summary><b>Proposed changes</b> \xB7 apply with <code>git apply</code></summary>",
+    "<summary><b>Proposed changes</b> \xB7 for reading; apply them via the suggestions or the stacked PR above</summary>",
     "",
     "```diff",
     clipped,
@@ -41009,7 +41372,9 @@ async function main() {
     console.log("\u2717 Not applied \u2014 code review REJECTED.");
   }
   const reviewBody = reviewFindings(walk2.runs);
-  const patchBody = proposeMode() ? proposedPatch(sandboxRoot) : "";
+  const rawDiff = proposeMode() ? rawProposedDiff(sandboxRoot) : "";
+  const patchBody = rawDiff ? renderPatchBlock(rawDiff) : "";
+  const delivery = rawDiff ? await deliverProposal(sandboxRoot, context, rawDiff) : void 0;
   let flagState;
   const summaryFlagKey = walk2.tags.flag_key;
   if (summaryFlagKey && verifierWriter) {
@@ -41037,6 +41402,7 @@ async function main() {
     ...flagState ? { flagState } : {},
     propose: proposeMode(),
     ...patchBody ? { patchBlock: patchBody } : {},
+    ...delivery ? { delivery } : {},
     ...reviewBody ? { review: reviewBody } : {},
     ...repoProfile ? { repoProfile } : {},
     approvalMode: policy.mode,
