@@ -361,3 +361,38 @@ describe("buildPrSummary — check run", () => {
     assert.match(r.comment, /No repository conventions found/);
   });
 });
+
+/**
+ * When GitHub blocks the action from opening the stacked PR — the default repo
+ * setting does exactly that — the fallback must stay one click, not degrade into a
+ * git command. Observed live: HTTP 403 "GitHub Actions is not permitted to create or
+ * approve pull requests".
+ */
+describe("buildPrSummary — stacked PR blocked by repo policy", () => {
+  const patch = ["<details>", "```diff", "diff --git a/a.json b/a.json", "```", "</details>"].join("\n");
+  const compare = "https://github.com/o/r/compare/feat%2Fx...autofactory%2Fpr-107?expand=1";
+
+  it("links the prefilled Open-PR page instead of naming a branch", () => {
+    const r = buildPrSummary({
+      ...base,
+      patchBlock: patch,
+      delivery: { suggestions: 0, stacked: { branch: "autofactory/pr-107", compareUrl: compare, files: ["a.json"] } },
+    });
+    assert.match(r.comment, /\*\*\[open the stacked PR\]\(.*expand=1\)\*\* and merge it, for the 1 file/);
+    assert.match(r.comment, /1 in a \[stacked PR\]/);
+    assert.doesNotMatch(r.comment, /merge branch/);
+  });
+
+  it("prefers a real PR url over the compare page when both exist", () => {
+    const r = buildPrSummary({
+      ...base,
+      patchBlock: patch,
+      delivery: {
+        suggestions: 0,
+        stacked: { branch: "b", prUrl: "https://github.com/o/r/pull/9", compareUrl: compare, files: ["a.json"] },
+      },
+    });
+    assert.match(r.comment, /merge \[the stacked PR\]\(https:\/\/github\.com\/o\/r\/pull\/9\)/);
+    assert.doesNotMatch(r.comment, /expand=1/);
+  });
+});

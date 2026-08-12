@@ -419,7 +419,16 @@ async function deliverProposal(
   const reasons = [...new Set(plan.deferred.map((d) => d.reason))];
   return {
     suggestions: review.posted,
-    ...(stacked ? { stacked: { branch: stacked.branch, ...(stacked.prUrl ? { prUrl: stacked.prUrl } : {}), files: stacked.files } } : {}),
+    ...(stacked
+      ? {
+          stacked: {
+            branch: stacked.branch,
+            ...(stacked.prUrl ? { prUrl: stacked.prUrl } : {}),
+            ...(stacked.compareUrl ? { compareUrl: stacked.compareUrl } : {}),
+            files: stacked.files,
+          },
+        }
+      : {}),
     ...(reasons.length ? { deferredReasons: reasons } : {}),
     ...(review.error ? { suggestionError: review.error } : {}),
   };

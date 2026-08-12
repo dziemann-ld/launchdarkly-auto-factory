@@ -40449,6 +40449,10 @@ async function postSuggestionReview(repo, prNumber, token, comments, intro) {
     return { posted: 0, error: msg };
   }
 }
+function compareUrl(repo, base, branch) {
+  const enc = (s) => s.split("/").map(encodeURIComponent).join("/");
+  return `https://github.com/${repo}/compare/${enc(base)}...${enc(branch)}?expand=1`;
+}
 async function publishStackedProposal(opts) {
   const { root, repo, prNumber, prBranch, token, paths, body } = opts;
   if (paths.length === 0) return void 0;
@@ -40510,11 +40514,17 @@ async function publishStackedProposal(opts) {
         }
       }
     }
-    console.warn(`Could not open the stacked PR: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+    const errBody = (await res.text()).slice(0, 200);
+    console.warn(`Could not open the stacked PR: HTTP ${res.status} ${errBody}`);
+    if (res.status === 403) {
+      console.log(
+        "::warning::AutoFactory: enable Settings \u2192 Actions \u2192 General \u2192 'Allow GitHub Actions to create and approve pull requests' to have the stacked PR opened automatically. Until then the comment links a prefilled Open-PR page."
+      );
+    }
   } catch (e) {
     console.warn(`Stacked PR error (non-fatal): ${e instanceof Error ? e.message : e}`);
   }
-  return { branch, files };
+  return { branch, files, compareUrl: compareUrl(repo, prBranch, branch) };
 }
 
 // src/suggestions.ts
@@ -40736,8 +40746,10 @@ function applyInstruction(input) {
     );
   }
   if (d.stacked) {
+    const n = d.stacked.files.length;
+    const files = `the ${n} file${n === 1 ? "" : "s"} that can't be suggestions`;
     parts.push(
-      d.stacked.prUrl ? `**merge [the stacked PR](${d.stacked.prUrl})** for the ${d.stacked.files.length} file${d.stacked.files.length === 1 ? "" : "s"} that can't be suggestions` : `**merge branch \`${d.stacked.branch}\`** for the ${d.stacked.files.length} file${d.stacked.files.length === 1 ? "" : "s"} that can't be suggestions`
+      d.stacked.prUrl ? `**merge [the stacked PR](${d.stacked.prUrl})** for ${files}` : d.stacked.compareUrl ? `**[open the stacked PR](${d.stacked.compareUrl})** and merge it, for ${files}` : `**merge branch \`${d.stacked.branch}\`** for ${files}`
     );
   }
   if (parts.length === 0) return "**Review the proposed changes below,**";
@@ -40795,7 +40807,10 @@ function factRows(input, counts) {
     const d = input.delivery;
     const how = [];
     if (d?.suggestions) how.push(`${d.suggestions} as suggested change${d.suggestions === 1 ? "" : "s"}`);
-    if (d?.stacked) how.push(d.stacked.prUrl ? `${d.stacked.files.length} in a [stacked PR](${d.stacked.prUrl})` : `${d.stacked.files.length} on \`${d.stacked.branch}\``);
+    if (d?.stacked) {
+      const link = d.stacked.prUrl ?? d.stacked.compareUrl;
+      how.push(link ? `${d.stacked.files.length} in a [stacked PR](${link})` : `${d.stacked.files.length} on \`${d.stacked.branch}\``);
+    }
     rows.push(
       `| **Changes** | ${files ? `${files} file${files === 1 ? "" : "s"}` : "proposed"}, **not committed**${how.length ? ` \u2014 ${how.join(", ")}` : " \u2014 see the diff below"} |`
     );
@@ -41112,7 +41127,14 @@ Merging this lands them on \`${prBranch}\`. Nothing here is applied until you me
   const reasons = [...new Set(plan.deferred.map((d) => d.reason))];
   return {
     suggestions: review.posted,
-    ...stacked ? { stacked: { branch: stacked.branch, ...stacked.prUrl ? { prUrl: stacked.prUrl } : {}, files: stacked.files } } : {},
+    ...stacked ? {
+      stacked: {
+        branch: stacked.branch,
+        ...stacked.prUrl ? { prUrl: stacked.prUrl } : {},
+        ...stacked.compareUrl ? { compareUrl: stacked.compareUrl } : {},
+        files: stacked.files
+      }
+    } : {},
     ...reasons.length ? { deferredReasons: reasons } : {},
     ...review.error ? { suggestionError: review.error } : {}
   };

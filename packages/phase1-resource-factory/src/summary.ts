@@ -67,7 +67,7 @@ export interface SummaryInput {
     /** Suggested changes posted as a review (Apply button, batchable). */
     suggestions: number;
     /** Stacked branch/PR carrying whatever couldn't be a suggestion. */
-    stacked?: { branch: string; prUrl?: string; files: string[] };
+    stacked?: { branch: string; prUrl?: string; compareUrl?: string; files: string[] };
     /** Why some changes couldn't be suggestions, deduped by reason. */
     deferredReasons?: string[];
     /** Set when the suggestion review failed to post at all. */
@@ -203,10 +203,17 @@ function applyInstruction(input: SuggestionInput): string {
     );
   }
   if (d.stacked) {
+    const n = d.stacked.files.length;
+    const files = `the ${n} file${n === 1 ? "" : "s"} that can't be suggestions`;
+    // Prefer a link the reader can click. compareUrl is the fallback when we were
+    // not allowed to open the PR ourselves — it opens GitHub's prefilled Open-PR
+    // page, so it stays one click rather than becoming a git command.
     parts.push(
       d.stacked.prUrl
-        ? `**merge [the stacked PR](${d.stacked.prUrl})** for the ${d.stacked.files.length} file${d.stacked.files.length === 1 ? "" : "s"} that can't be suggestions`
-        : `**merge branch \`${d.stacked.branch}\`** for the ${d.stacked.files.length} file${d.stacked.files.length === 1 ? "" : "s"} that can't be suggestions`,
+        ? `**merge [the stacked PR](${d.stacked.prUrl})** for ${files}`
+        : d.stacked.compareUrl
+          ? `**[open the stacked PR](${d.stacked.compareUrl})** and merge it, for ${files}`
+          : `**merge branch \`${d.stacked.branch}\`** for ${files}`,
     );
   }
   if (parts.length === 0) return "**Review the proposed changes below,**";
@@ -285,7 +292,10 @@ function factRows(input: SummaryInput, counts: FindingCounts): string[] {
     // Say HOW to take the work, not just how much of it there is.
     const how: string[] = [];
     if (d?.suggestions) how.push(`${d.suggestions} as suggested change${d.suggestions === 1 ? "" : "s"}`);
-    if (d?.stacked) how.push(d.stacked.prUrl ? `${d.stacked.files.length} in a [stacked PR](${d.stacked.prUrl})` : `${d.stacked.files.length} on \`${d.stacked.branch}\``);
+    if (d?.stacked) {
+      const link = d.stacked.prUrl ?? d.stacked.compareUrl;
+      how.push(link ? `${d.stacked.files.length} in a [stacked PR](${link})` : `${d.stacked.files.length} on \`${d.stacked.branch}\``);
+    }
     rows.push(
       `| **Changes** | ${files ? `${files} file${files === 1 ? "" : "s"}` : "proposed"}, **not committed**${how.length ? ` — ${how.join(", ")}` : " — see the diff below"} |`,
     );

@@ -120,7 +120,20 @@ export interface StackedProposal {
   /** URL of the stacked PR, when one could be opened or already existed. */
   prUrl?: string;
   prNumber?: number;
+  /**
+   * GitHub's prefilled "Open a pull request" page for this branch. Used when we
+   * couldn't open the PR ourselves — most often because the repo hasn't enabled
+   * "Allow GitHub Actions to create and approve pull requests", which is off by
+   * default. Still one click for the reviewer, which is the whole point.
+   */
+  compareUrl?: string;
   files: string[];
+}
+
+/** The prefilled compare/open-PR page for a stacked proposal branch. */
+export function compareUrl(repo: string, base: string, branch: string): string {
+  const enc = (s: string) => s.split("/").map(encodeURIComponent).join("/");
+  return `https://github.com/${repo}/compare/${enc(base)}...${enc(branch)}?expand=1`;
 }
 
 /**
@@ -205,10 +218,18 @@ export async function publishStackedProposal(opts: {
         }
       }
     }
-    console.warn(`Could not open the stacked PR: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+    const errBody = (await res.text()).slice(0, 200);
+    console.warn(`Could not open the stacked PR: HTTP ${res.status} ${errBody}`);
+    if (res.status === 403) {
+      console.log(
+        "::warning::AutoFactory: enable Settings → Actions → General → 'Allow GitHub Actions to create and approve pull requests' " +
+          "to have the stacked PR opened automatically. Until then the comment links a prefilled Open-PR page.",
+      );
+    }
   } catch (e) {
     console.warn(`Stacked PR error (non-fatal): ${e instanceof Error ? e.message : e}`);
   }
-  // The branch exists even when the PR couldn't be opened — still usable.
-  return { branch, files };
+  // The branch exists even when the PR couldn't be opened. Hand back the prefilled
+  // compare page so accepting the work is still a single click.
+  return { branch, files, compareUrl: compareUrl(repo, prBranch, branch) };
 }
