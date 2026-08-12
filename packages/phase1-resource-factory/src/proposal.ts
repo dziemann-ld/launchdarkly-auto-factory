@@ -130,6 +130,38 @@ export interface StackedProposal {
   files: string[];
 }
 
+/**
+ * Commit message for a stacked proposal.
+ *
+ * It must contain NO CI-skip directive. The first version appended `[skip ci]`,
+ * reasoning that the proposal branch didn't need its own CI run. Three things were
+ * wrong with that:
+ *
+ *  1. It was unnecessary — a proposal branch push triggers nothing when workflows are
+ *     keyed to `pull_request` (or, as here, to a label).
+ *  2. It suppressed the stacked PR's OWN checks, which are the reason to open a PR
+ *     rather than just push a branch.
+ *  3. Worst: GitHub composes a squash-merge message from the branch's commit
+ *     messages, so `[skip ci]` propagated into the squash commit on `main`. That push
+ *     then skipped EVERY workflow — including deploy. Observed live on
+ *     proj-launchpad f270c2f: the feature merged to main with no CI, no version tag,
+ *     no release, and no deploy, silently.
+ *
+ * A commit that lands in someone's default branch must never carry an instruction
+ * that disables their pipeline.
+ */
+export function proposalCommitMessage(prNumber: string): string {
+  return `chore(auto-factory): proposed changes for #${prNumber}`;
+}
+
+/** Any directive GitHub honors to skip a workflow run. */
+const CI_SKIP_RE = /\[(skip[ -]ci|ci[ -]skip|no[ -]ci|skip[ -]actions|actions[ -]skip)\]/i;
+
+/** True when a commit message would suppress workflows on whatever branch it reaches. */
+export function suppressesCi(message: string): boolean {
+  return CI_SKIP_RE.test(message);
+}
+
 /** The prefilled compare/open-PR page for a stacked proposal branch. */
 export function compareUrl(repo: string, base: string, branch: string): string {
   const enc = (s: string) => s.split("/").map(encodeURIComponent).join("/");
@@ -169,9 +201,7 @@ export async function publishStackedProposal(opts: {
       console.log("Stacked proposal: nothing to commit.");
       return undefined;
     }
-    // [skip ci] on the branch itself: the stacked PR runs CI, and the agents already
-    // ran the suite in-chain.
-    git(root, ["commit", "-q", "-m", `chore(auto-factory): proposed changes for #${prNumber}\n\n[skip ci]`]);
+    git(root, ["commit", "-q", "-m", proposalCommitMessage(prNumber)]);
     git(root, ["push", "--force", "origin", `HEAD:refs/heads/${branch}`]);
     console.log(`Pushed stacked proposal to '${branch}' (${staged.split("\n").length} file(s)).`);
   } catch (e) {

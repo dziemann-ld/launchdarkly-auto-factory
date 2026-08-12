@@ -40501,6 +40501,9 @@ async function postSuggestionReview(repo, prNumber, token, comments, intro) {
     return { posted: 0, error: msg };
   }
 }
+function proposalCommitMessage(prNumber) {
+  return `chore(auto-factory): proposed changes for #${prNumber}`;
+}
 function compareUrl(repo, base, branch) {
   const enc = (s) => s.split("/").map(encodeURIComponent).join("/");
   return `https://github.com/${repo}/compare/${enc(base)}...${enc(branch)}?expand=1`;
@@ -40520,9 +40523,7 @@ async function publishStackedProposal(opts) {
       console.log("Stacked proposal: nothing to commit.");
       return void 0;
     }
-    git2(root, ["commit", "-q", "-m", `chore(auto-factory): proposed changes for #${prNumber}
-
-[skip ci]`]);
+    git2(root, ["commit", "-q", "-m", proposalCommitMessage(prNumber)]);
     git2(root, ["push", "--force", "origin", `HEAD:refs/heads/${branch}`]);
     console.log(`Pushed stacked proposal to '${branch}' (${staged.split("\n").length} file(s)).`);
   } catch (e) {
